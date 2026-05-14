@@ -24,6 +24,8 @@
  */
 #include <Arduino.h>
 #include "SPI.h"
+#include "SD.h"
+#include <WiFi.h>
 #include "CYD28_LDR.h"
 #include "CYD28_RGBled.h"
 #include "CYD28_SD.h"
@@ -44,6 +46,65 @@ WiFiManager wifiManager;
 
 uint32_t tNow, tLast;
 
+// Try each "ssid password" line from /wifi.txt, top to bottom, until one
+// connects. Lines starting with '#' and blanks are skipped. Returns true
+// once associated; false if no SD card, no file, or all entries fail.
+static bool try_wifi_from_sd()
+{
+	Serial.println("[wifi] entered try_wifi_from_sd");
+	Serial.flush();
+	if (!SD.exists("/wifi.txt")) {
+		Serial.println("[wifi] SD.exists(/wifi.txt) = false");
+		Serial.flush();
+		return false;
+	}
+	File f = SD.open("/wifi.txt", "r");
+	if (!f) {
+		Serial.println("[wifi] SD.open(/wifi.txt) returned invalid file");
+		Serial.flush();
+		return false;
+	}
+	Serial.printf("[wifi] /wifi.txt opened, size=%u\n", (unsigned)f.size());
+	WiFi.mode(WIFI_STA);
+	char line[160];
+	while (f.available()) {
+		int len = f.readBytesUntil('\n', line, sizeof(line) - 1);
+		if (len <= 0) continue;
+		line[len] = 0;
+		// trim leading whitespace
+		char *s = line;
+		while (*s == ' ' || *s == '\t') s++;
+		// trim trailing \r / whitespace
+		char *e = s + strlen(s);
+		while (e > s && (e[-1] == '\r' || e[-1] == ' ' || e[-1] == '\t')) *--e = 0;
+		if (*s == 0 || *s == '#') continue;
+		// split on first whitespace
+		char *sep = s;
+		while (*sep && *sep != ' ' && *sep != '\t') sep++;
+		if (!*sep) continue;
+		*sep++ = 0;
+		while (*sep == ' ' || *sep == '\t') sep++;
+		const char *ssid = s, *pass = sep;
+		Serial.printf("[wifi] try ssid=\"%s\"\n", ssid);
+		WiFi.begin(ssid, pass);
+		unsigned long t0 = millis();
+		while (millis() - t0 < 12000) {
+			if (WiFi.status() == WL_CONNECTED) {
+				Serial.printf("[wifi] connected: %s -> %s\n", ssid,
+				              WiFi.localIP().toString().c_str());
+				f.close();
+				return true;
+			}
+			delay(200);
+		}
+		Serial.printf("[wifi] %s timed out\n", ssid);
+		WiFi.disconnect(true);
+		delay(200);
+	}
+	f.close();
+	return false;
+}
+
 void setup()
 {
 	Serial.begin(115200);
@@ -54,7 +115,7 @@ void setup()
 
 	console_init();
 	delay(1500);
-	
+
 	led.begin();
 	analogReadResolution(10);
 	ldr.begin();
@@ -64,9 +125,19 @@ void setup()
 	display.begin(CYD28_DISPLAY_ROT_LANDSC1);
 
 	gui_init();
+
+	// SD before WiFi so we can read /wifi.txt.
+	Serial.println("[boot] mounting SD...");
+	Serial.flush();
 	sdcard.begin();
-	// Set the SSID and possword for the AP here:
-	wifiManager.autoConnect("CYD28", "passwordcyd28");
+	Serial.printf("[boot] SD cardType=%d\n", (int)SD.cardType());
+	Serial.flush();
+	if (!try_wifi_from_sd()) {
+		Serial.println("[boot] falling back to WiFiManager");
+		Serial.flush();
+		// Fallback: WiFiManager captive portal (kept for first-boot use).
+		wifiManager.autoConnect("CYD28", "passwordcyd28");
+	}
 }
 
 void loop()
