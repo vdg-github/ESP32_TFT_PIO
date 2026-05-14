@@ -3,16 +3,15 @@
  * @brief Retro audio-player UI for the CYD 2.8" board.
  *
  *   Screens:
- *     - screenPlayer    : status bar, track title, big L/R VU meters,
- *                         volume slider, transport bar
+ *     - screenPlayer    : disc + vertical VU, track info, volume, transport
  *     - screenSources   : SD files / Radio / TTS / Settings picker
- *     - screenBrowser   : list of audio files on the SD card root
+ *     - screenBrowser   : list of audio files on the SD card
  *     - screenRadio     : hard-coded internet radio presets
  *     - screenTTS       : TTS phrase shortcuts
  *     - screenSettings  : system info, LDR readout, WiFi reset
  *
- *   Aesthetic: black background, amber/green accent colours,
- *   UbuntuCond fonts, gradient VU bars (green -> amber -> red).
+ *   Aesthetic: black background, neon/arcade accent colours,
+ *   Montserrat 14/28 for FA symbols, UbuntuCond for text.
  */
 
 #include "gui.h"
@@ -31,13 +30,12 @@ extern const lv_font_t UbuntuCond14;
 extern const lv_font_t UbuntuCond36;
 
 // ---------------- 8-bit / arcade palette -----------------------------------
-#define COL_BG          lv_color_hex(0x0a0820)   // CRT dark navy
-#define COL_BG_BAR      lv_color_hex(0x05030f)   // status bar bg
-#define COL_PANEL       lv_color_hex(0x100a30)   // slightly lighter panel
-#define COL_PANEL_BRD   lv_color_hex(0x4a30a0)   // purple border
-#define COL_TXT         lv_color_hex(0xfff8e8)   // off-white
-#define COL_TXT_DIM     lv_color_hex(0x9080d0)   // dim violet
-// arcade primaries
+#define COL_BG          lv_color_hex(0x0a0820)
+#define COL_BG_BAR      lv_color_hex(0x05030f)
+#define COL_PANEL       lv_color_hex(0x100a30)
+#define COL_PANEL_BRD   lv_color_hex(0x4a30a0)
+#define COL_TXT         lv_color_hex(0xfff8e8)
+#define COL_TXT_DIM     lv_color_hex(0x9080d0)
 #define COL_RED         lv_color_hex(0xff2244)
 #define COL_ORANGE      lv_color_hex(0xff7800)
 #define COL_YELLOW      lv_color_hex(0xffd000)
@@ -48,7 +46,6 @@ extern const lv_font_t UbuntuCond36;
 #define COL_MAGENTA     lv_color_hex(0xff30d0)
 #define COL_PINK        lv_color_hex(0xff5a8e)
 #define COL_PURPLE      lv_color_hex(0x9040ff)
-// legacy aliases kept so the unmodified parts of the file still compile
 #define COL_AMBER       COL_YELLOW
 #define COL_AMBER_DIM   lv_color_hex(0x4a30a0)
 
@@ -67,11 +64,13 @@ static lv_obj_t *lblHeader;
 
 static lv_obj_t *lblNowPlaying;
 static lv_obj_t *lblTrack;
+static lv_obj_t *lblFolder;
 static lv_obj_t *vuL;
 static lv_obj_t *vuR;
 static lv_obj_t *volSlider;
 static lv_obj_t *lblVol;
-static lv_obj_t *lblState;     // PLAYING / STOPPED indicator dot+text
+static lv_obj_t *btnPlayPause;
+static lv_obj_t *lblPlayPause;
 
 // ---------------- spinning disc --------------------------------------------
 LV_IMG_DECLARE(disc_img);
@@ -94,9 +93,17 @@ static lv_style_t st_btn_pressed;
 static lv_style_t st_chip;
 
 // ---------------- state ----------------------------------------------------
-static char  s_track[64]   = "";       // current track / stream name
-static bool  s_playing     = false;
+static char  s_track[128]    = "";      // full path of current track
+static bool  s_playing      = false;
 static char  s_statusBuf[256];
+
+// ---- playlist: audio files in the current folder ----
+#define PLAYLIST_MAX 32
+#define PATH_LEN     128
+static char  s_pl_dir[PATH_LEN]  = "";  // folder of current track
+static char  s_pl_files[PLAYLIST_MAX][PATH_LEN]; // filenames only
+static int   s_pl_count     = 0;
+static int   s_pl_idx       = -1;     // -1 = no track selected
 
 // ---------------- forward decls --------------------------------------------
 static void build_player(void);
@@ -106,7 +113,10 @@ static void build_radio(void);
 static void build_tts(void);
 static void build_settings(void);
 
+static void playlist_load(const char *dirpath);
+static void playlist_play_idx(int idx);
 static void set_track(const char *name, bool playing);
+static void update_play_pause_btn(void);
 static void refresh_volume_label(int pct);
 static void refresh_status_bar(void);
 
@@ -162,7 +172,7 @@ static void init_styles(void)
     lv_style_set_bg_opa(&st_vu_indic, LV_OPA_COVER);
     lv_style_set_bg_color(&st_vu_indic, COL_GREEN);
     lv_style_set_bg_grad_color(&st_vu_indic, COL_RED);
-    lv_style_set_bg_grad_dir(&st_vu_indic, LV_GRAD_DIR_HOR);
+    lv_style_set_bg_grad_dir(&st_vu_indic, LV_GRAD_DIR_VER);
     lv_style_set_radius(&st_vu_indic, 0);
 
     lv_style_init(&st_btn);
@@ -172,7 +182,7 @@ static void init_styles(void)
     lv_style_set_border_width(&st_btn, 1);
     lv_style_set_radius(&st_btn, 2);
     lv_style_set_text_color(&st_btn, COL_AMBER);
-    lv_style_set_text_font(&st_btn, &lv_font_montserrat_14);   // contains FA symbols
+    lv_style_set_text_font(&st_btn, &lv_font_montserrat_14);
     lv_style_set_pad_all(&st_btn, 4);
 
     lv_style_init(&st_btn_pressed);
@@ -231,9 +241,6 @@ void gui_init(void)
 // ===========================================================================
 //                       S T A T U S   B A R   (shared)
 // ===========================================================================
-//   24px tall header with WiFi/IP on the left, heap+PSRAM on the right.
-//   We attach one to every screen and re-render via refresh_status_bar()
-//   for whichever screen is currently active.
 static void add_status_bar(lv_obj_t *scr, lv_obj_t **lblLeft, lv_obj_t **lblRight, lv_obj_t **lblMid)
 {
     lv_obj_t *bar = lv_obj_create(scr);
@@ -242,7 +249,7 @@ static void add_status_bar(lv_obj_t *scr, lv_obj_t **lblLeft, lv_obj_t **lblRigh
     lv_obj_set_pos(bar, 0, 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(0x100c00), 0);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(bar, COL_AMBER_DIM, 0);
+    lv_obj_set_style_border_color(bar, COL_MAGENTA, 0);
     lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_BOTTOM, 0);
     lv_obj_set_style_border_width(bar, 1, 0);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
@@ -264,9 +271,6 @@ static void add_status_bar(lv_obj_t *scr, lv_obj_t **lblLeft, lv_obj_t **lblRigh
     lv_obj_set_style_text_font(*lblRight, &UbuntuCond14, 0);
     lv_obj_align(*lblRight, LV_ALIGN_RIGHT_MID, -6, 0);
     lv_label_set_text(*lblRight, "--");
-
-    lv_obj_set_style_bg_color(bar, COL_BG_BAR, 0);
-    lv_obj_set_style_border_color(bar, COL_MAGENTA, 0);
 }
 
 // ---- per-screen status bar handles ----
@@ -301,6 +305,65 @@ static void refresh_status_bar(void)
 }
 
 // ===========================================================================
+//                    P L A Y L I S T   H E L P E R S
+// ===========================================================================
+static bool has_audio_ext(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    if (!dot) return false;
+    return  !strcasecmp(dot, ".mp3") || !strcasecmp(dot, ".wav") ||
+            !strcasecmp(dot, ".flac")|| !strcasecmp(dot, ".m4a") ||
+            !strcasecmp(dot, ".ogg") || !strcasecmp(dot, ".aac");
+}
+
+static int audio_cmp(const void *a, const void *b)
+{
+    return strcasecmp((const char *)a, (const char *)b);
+}
+
+static void playlist_load(const char *dirpath)
+{
+    s_pl_count = 0;
+    s_pl_idx   = -1;
+    snprintf(s_pl_dir, sizeof(s_pl_dir), "%s", dirpath);
+
+    File dir = SD.open(dirpath);
+    if (!dir || !dir.isDirectory()) {
+        if (dir) dir.close();
+        return;
+    }
+    // Collect audio files
+    File f = dir.openNextFile();
+    while (f && s_pl_count < PLAYLIST_MAX) {
+        const char *full = f.name();
+        const char *base = strrchr(full, '/');
+        base = base ? base + 1 : full;
+        if (!f.isDirectory() && has_audio_ext(base)) {
+            snprintf(s_pl_files[s_pl_count], PATH_LEN, "%s", base);
+            s_pl_count++;
+        }
+        f = dir.openNextFile();
+    }
+    dir.close();
+    // Sort alphabetically
+    if (s_pl_count > 1)
+        qsort(s_pl_files, s_pl_count, PATH_LEN, audio_cmp);
+}
+
+static void playlist_play_idx(int idx)
+{
+    if (idx < 0 || idx >= s_pl_count) return;
+    s_pl_idx = idx;
+    static char path[PATH_LEN + PATH_LEN];
+    if (strcmp(s_pl_dir, "/") == 0 || s_pl_dir[0] == 0)
+        snprintf(path, sizeof(path), "/%s", s_pl_files[idx]);
+    else
+        snprintf(path, sizeof(path), "%s/%s", s_pl_dir, s_pl_files[idx]);
+    audioConnecttoSD(path);
+    set_track(path, true);
+}
+
+// ===========================================================================
 //                         P L A Y E R   S C R E E N
 // ===========================================================================
 static lv_obj_t *make_transport_btn(lv_obj_t *parent, const char *sym, int x_pct,
@@ -329,76 +392,84 @@ static void build_player(void)
 {
     add_status_bar(screenPlayer, &sbP_l, &sbP_r, &sbP_m);
 
-    // Spinning disc (top-right). Pivot centred so rotation spins in place.
+    // ---- Spinning disc (top-left) ----
     imgDisc = lv_img_create(screenPlayer);
     lv_img_set_src(imgDisc, &disc_img);
-    lv_obj_set_pos(imgDisc, 232, 26);
+    lv_obj_set_pos(imgDisc, 4, 26);
     lv_img_set_pivot(imgDisc, 40, 40);
-    lv_img_set_antialias(imgDisc, false);   // crisp pixel-y feel
+    lv_img_set_antialias(imgDisc, false);
     lv_img_set_angle(imgDisc, 0);
 
-    // "NOW PLAYING" label
-    lblNowPlaying = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(lblNowPlaying, COL_PINK, 0);
-    lv_obj_set_style_text_font(lblNowPlaying, &UbuntuCond14, 0);
-    lv_obj_align(lblNowPlaying, LV_ALIGN_TOP_LEFT, 8, 26);
-    lv_label_set_text(lblNowPlaying, "NOW PLAYING");
-
-    // Small state pill under the disc
-    lblState = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(lblState, COL_PINK, 0);
-    lv_obj_set_style_text_font(lblState, &lv_font_montserrat_14, 0);
-    lv_obj_set_pos(lblState, 240, 108);
-    lv_label_set_text(lblState, LV_SYMBOL_STOP " IDLE");
-
-    // Track title (narrower so it doesn't run into the disc)
-    lblTrack = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(lblTrack, COL_YELLOW, 0);
-    lv_obj_set_style_text_font(lblTrack, &UbuntuCond36, 0);
-    lv_obj_set_width(lblTrack, 220);
-    lv_label_set_long_mode(lblTrack, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_align(lblTrack, LV_ALIGN_TOP_LEFT, 8, 48);
-    lv_label_set_text(lblTrack, "[ STANDBY ]");
-
-    // VU L
+    // ---- VU labels (L / R) above bars, right of disc ----
     lv_obj_t *vuLlbl = lv_label_create(screenPlayer);
     lv_obj_set_style_text_color(vuLlbl, COL_CYAN, 0);
-    lv_obj_set_style_text_font(vuLlbl, &UbuntuCond14, 0);
-    lv_obj_align(vuLlbl, LV_ALIGN_TOP_LEFT, 8, 100);
+    lv_obj_set_style_text_font(vuLlbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(vuLlbl, 92, 26);
     lv_label_set_text(vuLlbl, "L");
 
+    lv_obj_t *vuRlbl = lv_label_create(screenPlayer);
+    lv_obj_set_style_text_color(vuRlbl, COL_MAGENTA, 0);
+    lv_obj_set_style_text_font(vuRlbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(vuRlbl, 108, 26);
+    lv_label_set_text(vuRlbl, "R");
+
+    // ---- Vertical VU bars (right of disc) ----
     vuL = lv_bar_create(screenPlayer);
     lv_obj_remove_style_all(vuL);
     lv_obj_add_style(vuL, &st_vu_bg, LV_PART_MAIN);
     lv_obj_add_style(vuL, &st_vu_indic, LV_PART_INDICATOR);
-    lv_obj_set_size(vuL, 280, 16);
-    lv_obj_align(vuL, LV_ALIGN_TOP_LEFT, 24, 100);
+    lv_obj_set_size(vuL, 14, 74);
+    lv_obj_set_pos(vuL, 92, 40);
     lv_bar_set_range(vuL, 0, 100);
     lv_bar_set_value(vuL, 0, LV_ANIM_OFF);
-
-    // VU R
-    lv_obj_t *vuRlbl = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(vuRlbl, COL_MAGENTA, 0);
-    lv_obj_set_style_text_font(vuRlbl, &UbuntuCond14, 0);
-    lv_obj_align(vuRlbl, LV_ALIGN_TOP_LEFT, 8, 122);
-    lv_label_set_text(vuRlbl, "R");
 
     vuR = lv_bar_create(screenPlayer);
     lv_obj_remove_style_all(vuR);
     lv_obj_add_style(vuR, &st_vu_bg, LV_PART_MAIN);
     lv_obj_add_style(vuR, &st_vu_indic, LV_PART_INDICATOR);
-    // override gradient for R so the two channels read as a stereo pair
     lv_obj_set_style_bg_color(vuR, COL_CYAN, LV_PART_INDICATOR);
     lv_obj_set_style_bg_grad_color(vuR, COL_MAGENTA, LV_PART_INDICATOR);
-    lv_obj_set_size(vuR, 280, 16);
-    lv_obj_align(vuR, LV_ALIGN_TOP_LEFT, 24, 122);
+    lv_obj_set_size(vuR, 14, 74);
+    lv_obj_set_pos(vuR, 108, 40);
     lv_bar_set_range(vuR, 0, 100);
     lv_bar_set_value(vuR, 0, LV_ANIM_OFF);
 
-    // Volume slider
+    // ---- Track info area (right of disc+VU, below status bar) ----
+    // "NOW PLAYING" header
+    lblNowPlaying = lv_label_create(screenPlayer);
+    lv_obj_set_style_text_color(lblNowPlaying, COL_PINK, 0);
+    lv_obj_set_style_text_font(lblNowPlaying, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(lblNowPlaying, 128, 28);
+    lv_label_set_text(lblNowPlaying, LV_SYMBOL_PLAY " NOW PLAYING");
+
+    // Track name (large, scrolling)
+    lblTrack = lv_label_create(screenPlayer);
+    lv_obj_set_style_text_color(lblTrack, COL_YELLOW, 0);
+    lv_obj_set_style_text_font(lblTrack, &UbuntuCond36, 0);
+    lv_obj_set_width(lblTrack, 184);
+    lv_label_set_long_mode(lblTrack, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_pos(lblTrack, 128, 48);
+    lv_label_set_text(lblTrack, "[ STANDBY ]");
+
+    // Folder / album name
+    lblFolder = lv_label_create(screenPlayer);
+    lv_obj_set_style_text_color(lblFolder, COL_TXT_DIM, 0);
+    lv_obj_set_style_text_font(lblFolder, &UbuntuCond14, 0);
+    lv_obj_set_width(lblFolder, 184);
+    lv_label_set_long_mode(lblFolder, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_pos(lblFolder, 128, 84);
+    lv_label_set_text(lblFolder, "");
+
+    // ---- Volume slider (below disc/VU area) ----
+    lv_obj_t *vTag = lv_label_create(screenPlayer);
+    lv_obj_set_style_text_color(vTag, COL_PURPLE, 0);
+    lv_obj_set_style_text_font(vTag, &UbuntuCond14, 0);
+    lv_obj_set_pos(vTag, 8, 118);
+    lv_label_set_text(vTag, "VOL");
+
     volSlider = lv_slider_create(screenPlayer);
-    lv_obj_set_size(volSlider, 220, 8);
-    lv_obj_align(volSlider, LV_ALIGN_TOP_LEFT, 24, 154);
+    lv_obj_set_size(volSlider, 230, 8);
+    lv_obj_set_pos(volSlider, 36, 120);
     lv_slider_set_range(volSlider, 0, 100);
     lv_obj_set_style_bg_color(volSlider, COL_PANEL, LV_PART_MAIN);
     lv_obj_set_style_border_color(volSlider, COL_PURPLE, LV_PART_MAIN);
@@ -411,25 +482,18 @@ static void build_player(void)
     lblVol = lv_label_create(screenPlayer);
     lv_obj_set_style_text_color(lblVol, COL_PINK, 0);
     lv_obj_set_style_text_font(lblVol, &UbuntuCond14, 0);
-    lv_obj_align(lblVol, LV_ALIGN_TOP_RIGHT, -8, 150);
-    lv_label_set_text(lblVol, "VOL ---");
+    lv_obj_set_pos(lblVol, 272, 116);
+    lv_label_set_text(lblVol, "---%");
 
-    lv_obj_t *vTag = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(vTag, COL_PURPLE, 0);
-    lv_obj_set_style_text_font(vTag, &UbuntuCond14, 0);
-    lv_obj_align(vTag, LV_ALIGN_TOP_LEFT, 8, 150);
-    lv_label_set_text(vTag, "VOL");
-
-    // Init volume from audio backend
     int pct = audioGetVolumePerCent();
     lv_slider_set_value(volSlider, pct, LV_ANIM_OFF);
     refresh_volume_label(pct);
 
-    // Transport bar (y=190..234)
+    // ---- Transport bar (y=136..236) ----
     lv_obj_t *tbar = lv_obj_create(screenPlayer);
     lv_obj_remove_style_all(tbar);
-    lv_obj_set_size(tbar, 320, 50);
-    lv_obj_set_pos(tbar, 0, 190);
+    lv_obj_set_size(tbar, 320, 104);
+    lv_obj_set_pos(tbar, 0, 136);
     lv_obj_set_style_bg_color(tbar, lv_color_hex(0x0a0700), 0);
     lv_obj_set_style_bg_opa(tbar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(tbar, COL_AMBER_DIM, 0);
@@ -437,12 +501,17 @@ static void build_player(void)
     lv_obj_set_style_border_width(tbar, 1, 0);
     lv_obj_clear_flag(tbar, LV_OBJ_FLAG_SCROLLABLE);
 
-    // 5 buttons, 56px wide + spacing
-    make_transport_btn(tbar, LV_SYMBOL_PLAY,     4,   0, COL_LIME);     // play
-    make_transport_btn(tbar, LV_SYMBOL_PAUSE,    66,  1, COL_YELLOW);   // pause
-    make_transport_btn(tbar, LV_SYMBOL_STOP,     128, 2, COL_RED);      // stop
-    make_transport_btn(tbar, LV_SYMBOL_LIST,     190, 3, COL_CYAN);     // sources
-    make_transport_btn(tbar, LV_SYMBOL_SETTINGS, 252, 4, COL_MAGENTA);  // settings
+    // idx 0=PREV, 1=PLAY/PAUSE, 2=NEXT, 3=FOLDER
+    make_transport_btn(tbar, LV_SYMBOL_PREV,     4,   0, COL_CYAN);
+    btnPlayPause = make_transport_btn(tbar, LV_SYMBOL_PLAY,  66,  1, COL_LIME);
+    // Cache the label so we can toggle between PLAY / PAUSE
+    lblPlayPause = lv_obj_get_child(btnPlayPause, 0);
+
+    make_transport_btn(tbar, LV_SYMBOL_NEXT,      128, 2, COL_YELLOW);
+    make_transport_btn(tbar, LV_SYMBOL_LIST,      190, 3, COL_MAGENTA);
+
+    // "Sources" button on the far right
+    make_transport_btn(tbar, LV_SYMBOL_AUDIO,     252, 4, COL_CYAN);
 
     lv_obj_clear_flag(screenPlayer, LV_OBJ_FLAG_SCROLLABLE);
 }
@@ -475,7 +544,7 @@ static lv_obj_t *make_big_btn(lv_obj_t *parent, const char *sym, const char *tex
 
     lv_obj_t *symL = lv_label_create(col);
     lv_label_set_text(symL, sym);
-    lv_obj_set_style_text_font(symL, &lv_font_montserrat_28, 0);  // FA-bearing
+    lv_obj_set_style_text_font(symL, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(symL, accent, 0);
 
     lv_obj_t *txtL = lv_label_create(col);
@@ -497,13 +566,11 @@ static void build_sources(void)
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 30);
     lv_label_set_text(title, "PICK A SOURCE");
 
-    // 2x2 grid: each tile a different arcade color
     make_big_btn(screenSources, LV_SYMBOL_SD_CARD,  "SD FILES",  8,   56, 148, 70, 0, on_source_pick, COL_LIME);
     make_big_btn(screenSources, LV_SYMBOL_AUDIO,    "RADIO",     164, 56, 148, 70, 1, on_source_pick, COL_CYAN);
     make_big_btn(screenSources, LV_SYMBOL_KEYBOARD, "SPEECH",    8,   132,148, 70, 2, on_source_pick, COL_PINK);
     make_big_btn(screenSources, LV_SYMBOL_SETTINGS, "SETTINGS",  164, 132,148, 70, 3, on_source_pick, COL_YELLOW);
 
-    // BACK button
     lv_obj_t *back = lv_btn_create(screenSources);
     lv_obj_remove_style_all(back);
     lv_obj_add_style(back, &st_btn, 0);
@@ -523,19 +590,7 @@ static void build_sources(void)
 // ===========================================================================
 static lv_obj_t *browserList;
 
-static bool has_audio_ext(const char *name)
-{
-    const char *dot = strrchr(name, '.');
-    if (!dot) return false;
-    return  !strcasecmp(dot, ".mp3") || !strcasecmp(dot, ".wav") ||
-            !strcasecmp(dot, ".flac")|| !strcasecmp(dot, ".m4a") ||
-            !strcasecmp(dot, ".ogg") || !strcasecmp(dot, ".aac");
-}
-
 // ---- file browser navigation state ----
-// Browser starts at /music. Tapping a folder enters it; tapping ".." goes up.
-// Tapping a file plays it. We persist full paths in a fixed pool so the
-// const char* the audio queue stores stays alive.
 #define BROWSER_MAX_ENTRIES 32
 #define BROWSER_PATH_LEN    96
 
@@ -557,7 +612,7 @@ static void path_parent(char *out, size_t cap, const char *p)
     snprintf(out, cap, "%s", p);
     char *slash = strrchr(out, '/');
     if (!slash) { out[0] = '/'; out[1] = 0; return; }
-    if (slash == out) { out[1] = 0; return; }   // parent of /foo is /
+    if (slash == out) { out[1] = 0; return; }
     *slash = 0;
 }
 
@@ -577,7 +632,6 @@ static void browser_populate(lv_obj_t *list)
         return;
     }
 
-    // Header row showing current directory
     char head[BROWSER_PATH_LEN + 8];
     snprintf(head, sizeof(head), "[ %s ]", browser_cwd);
     lv_obj_t *h = lv_list_add_text(list, head);
@@ -587,7 +641,6 @@ static void browser_populate(lv_obj_t *list)
     File dir = SD.open(browser_cwd);
     if (!dir || !dir.isDirectory()) {
         if (dir) dir.close();
-        // fallback to root once if the preferred dir is missing
         if (strcmp(browser_cwd, "/") != 0) {
             snprintf(browser_cwd, sizeof(browser_cwd), "/");
             browser_populate(list);
@@ -598,7 +651,6 @@ static void browser_populate(lv_obj_t *list)
         return;
     }
 
-    // ".." up-link unless already at root
     if (strcmp(browser_cwd, "/") != 0 && browser_n_entries < BROWSER_MAX_ENTRIES) {
         snprintf(browser_entries[browser_n_entries], BROWSER_PATH_LEN, "..");
         browser_is_dir[browser_n_entries] = true;
@@ -614,7 +666,6 @@ static void browser_populate(lv_obj_t *list)
         browser_n_entries++;
     }
 
-    // Pass 1: directories, Pass 2: files. Two passes so albums sort to top.
     for (int pass = 0; pass < 2 && browser_n_entries < BROWSER_MAX_ENTRIES; pass++) {
         dir.rewindDirectory();
         File f = dir.openNextFile();
@@ -649,7 +700,7 @@ static void browser_populate(lv_obj_t *list)
     dir.close();
 
     if (browser_n_entries == 0 ||
-        (browser_n_entries == 1 && browser_is_dir[0])) {  // only ".." present
+        (browser_n_entries == 1 && browser_is_dir[0])) {
         lv_obj_t *e = lv_list_add_text(list, "(empty)");
         lv_obj_set_style_text_color(e, COL_TXT_DIM, 0);
     }
@@ -707,7 +758,6 @@ typedef struct {
     const char *url;
 } radio_entry_t;
 
-// URL strings must live forever (audio task references them).
 static const radio_entry_t radio_presets[] = {
     { "Radio Paradise (FLAC)", "http://stream.radioparadise.com/flac" },
     { "SomaFM Groove Salad",   "http://ice1.somafm.com/groovesalad-128-mp3" },
@@ -839,7 +889,7 @@ static void sysinfo_text(char *buf, size_t n)
     esp_chip_info(&chip);
     const char *radio = (chip.features & CHIP_FEATURE_BT)
                       ? ((chip.features & CHIP_FEATURE_BLE) ? "BT/BLE" : "BT")
-                      : ((chip.features & CHIP_FEATURE_BLE) ? "BLE" : "—");
+                      : ((chip.features & CHIP_FEATURE_BLE) ? "BLE" : "---");
     const char *fl    = (chip.features & CHIP_FEATURE_EMB_FLASH) ? "emb" : "ext";
 
     const char *mods =
@@ -881,7 +931,6 @@ static void build_settings(void)
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 30);
     lv_label_set_text(title, "DIAGNOSTICS");
 
-    // Sysinfo panel
     lv_obj_t *panel = lv_obj_create(screenSettings);
     lv_obj_remove_style_all(panel);
     lv_obj_add_style(panel, &st_panel, 0);
@@ -897,14 +946,12 @@ static void build_settings(void)
     sysinfo_text(s_statusBuf, sizeof(s_statusBuf));
     lv_label_set_text(lblSysinfo, s_statusBuf);
 
-    // LDR live readout
     lblLdrLive = lv_label_create(screenSettings);
     lv_obj_set_style_text_color(lblLdrLive, COL_AMBER, 0);
     lv_obj_set_style_text_font(lblLdrLive, &UbuntuCond14, 0);
     lv_obj_align(lblLdrLive, LV_ALIGN_TOP_LEFT, 8, 170);
     lv_label_set_text(lblLdrLive, "LDR: ----   day/night: --");
 
-    // Bottom buttons: BACK, WIFI RESET
     lv_obj_t *back = lv_btn_create(screenSettings);
     lv_obj_remove_style_all(back);
     lv_obj_add_style(back, &st_btn, 0);
@@ -933,6 +980,32 @@ static void build_settings(void)
 // ===========================================================================
 //                         H E L P E R S
 // ===========================================================================
+static void extract_basename(const char *path, char *out, size_t n)
+{
+    const char *slash = strrchr(path, '/');
+    if (slash) slash++; else slash = path;
+    strncpy(out, slash, n - 1);
+    out[n - 1] = 0;
+    // Strip extension
+    char *dot = strrchr(out, '.');
+    if (dot) *dot = 0;
+}
+
+static void extract_folder(const char *path, char *out, size_t n)
+{
+    strncpy(out, path, n - 1);
+    out[n - 1] = 0;
+    char *slash = strrchr(out, '/');
+    if (slash) *slash = 0;
+    // Get last component
+    const char *base = strrchr(path, '/');
+    if (base) base++; else base = path;
+    // If folder is /music or / just show path, otherwise show folder name
+    if (strcmp(out, "/music") == 0 || strcmp(out, "/") == 0) {
+        // Show as-is
+    }
+}
+
 static void set_track(const char *name, bool playing)
 {
     if (name) {
@@ -942,21 +1015,43 @@ static void set_track(const char *name, bool playing)
         s_track[0] = 0;
     }
     s_playing = playing;
-    if (lblTrack)  lv_label_set_text(lblTrack, s_track[0] ? s_track : "[ STANDBY ]");
-    if (lblState) {
-        if (playing) {
-            lv_label_set_text(lblState, LV_SYMBOL_PLAY " PLAYING");
-            lv_obj_set_style_text_color(lblState, COL_GREEN, 0);
+    if (lblTrack) {
+        if (s_track[0]) {
+            char basename[64];
+            extract_basename(s_track, basename, sizeof(basename));
+            lv_label_set_text(lblTrack, basename);
         } else {
-            lv_label_set_text(lblState, LV_SYMBOL_STOP " STOPPED");
-            lv_obj_set_style_text_color(lblState, COL_TXT_DIM, 0);
+            lv_label_set_text(lblTrack, "[ STANDBY ]");
         }
     }
+    // Update folder label
+    if (lblFolder) {
+        if (s_track[0]) {
+            char folder[PATH_LEN];
+            extract_folder(s_track, folder, sizeof(folder));
+            // Show just the last folder component
+            const char *last = strrchr(folder, '/');
+            if (last && last[1]) last++; else last = folder;
+            lv_label_set_text_fmt(lblFolder, LV_SYMBOL_DIRECTORY " %s", last);
+        } else {
+            lv_label_set_text(lblFolder, "");
+        }
+    }
+    update_play_pause_btn();
+}
+
+static void update_play_pause_btn(void)
+{
+    if (!lblPlayPause) return;
+    if (s_playing)
+        lv_label_set_text(lblPlayPause, LV_SYMBOL_PAUSE);
+    else
+        lv_label_set_text(lblPlayPause, LV_SYMBOL_PLAY);
 }
 
 static void refresh_volume_label(int pct)
 {
-    if (lblVol) lv_label_set_text_fmt(lblVol, "VOL %3d%%", pct);
+    if (lblVol) lv_label_set_text_fmt(lblVol, "%d%%", pct);
 }
 
 // ===========================================================================
@@ -976,18 +1071,14 @@ static void cb_status(lv_timer_t *t)
 {
     refresh_status_bar();
 
-    // sync running state from audio backend so UI reflects EOF
     bool now = audioIsPlaying();
     if (now != s_playing) {
         s_playing = now;
-        if (lblState) {
-            if (now) {
-                lv_label_set_text(lblState, LV_SYMBOL_PLAY " PLAYING");
-                lv_obj_set_style_text_color(lblState, COL_LIME, 0);
-            } else {
-                lv_label_set_text(lblState, LV_SYMBOL_STOP " STOPPED");
-                lv_obj_set_style_text_color(lblState, COL_PINK, 0);
-            }
+        update_play_pause_btn();
+        if (lblNowPlaying) {
+            lv_label_set_text(lblNowPlaying,
+                now ? LV_SYMBOL_PAUSE " NOW PLAYING" : LV_SYMBOL_PLAY " STOPPED");
+            lv_obj_set_style_text_color(lblNowPlaying, now ? COL_LIME : COL_TXT_DIM, 0);
         }
     }
 }
@@ -1001,8 +1092,6 @@ static void cb_settings(lv_timer_t *t)
                           (int)ldr.get(), ldr.isDark() ? "night" : "day");
 }
 
-// Spinning CD: advance angle only when audio is playing and we're on
-// screenPlayer. 12 degrees per 50ms tick = 240 deg/s = ~40 rpm.
 static void cb_disc(lv_timer_t *t)
 {
     if (!s_playing) return;
@@ -1018,30 +1107,55 @@ static void on_vol_change(lv_event_t *e)
 {
     int32_t val = lv_slider_get_value(volSlider);
     refresh_volume_label(val);
-    audioSetVolume((val * 21) / 100);   // backend uses 0..21
+    audioSetVolume((val * 21) / 100);
 }
 
 static void on_transport(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     switch (idx) {
-        case 0:  // PLAY — re-trigger last (if local file)
-            if (s_track[0] && s_track[0] == '/') {
-                audioConnecttoSD(s_track);
-                set_track(s_track, true);
+        case 0: // PREV
+            if (s_pl_count > 0 && s_pl_idx > 0) {
+                playlist_play_idx(s_pl_idx - 1);
             }
             break;
-        case 1:  // PAUSE — backend has no pause, treat as stop
-        case 2:  // STOP
-            audioStopSong();
-            set_track(s_track, false);
+        case 1: // PLAY / PAUSE toggle
+            if (s_playing) {
+                // Currently playing -> stop
+                audioStopSong();
+                s_playing = false;
+                update_play_pause_btn();
+                if (lblNowPlaying) {
+                    lv_label_set_text(lblNowPlaying, LV_SYMBOL_PLAY " STOPPED");
+                    lv_obj_set_style_text_color(lblNowPlaying, COL_TXT_DIM, 0);
+                }
+            } else {
+                // Stopped -> play current track (or re-trigger)
+                if (s_track[0]) {
+                    if (s_pl_idx >= 0) {
+                        playlist_play_idx(s_pl_idx);
+                    } else {
+                        audioConnecttoSD(s_track);
+                        set_track(s_track, true);
+                    }
+                }
+            }
             break;
-        case 3:  // LIST → sources
-            lv_scr_load_anim(screenSources, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+        case 2: // NEXT
+            if (s_pl_count > 0 && s_pl_idx < s_pl_count - 1) {
+                playlist_play_idx(s_pl_idx + 1);
+            }
+            break;
+        case 3: // FOLDER - jump to browser in current playlist dir
+            if (s_pl_dir[0]) {
+                snprintf(browser_cwd, sizeof(browser_cwd), "%s", s_pl_dir);
+            }
+            browser_populate(browserList);
+            lv_scr_load_anim(screenBrowser, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
             refresh_status_bar();
             break;
-        case 4:  // SETTINGS
-            lv_scr_load_anim(screenSettings, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+        case 4: // SOURCES
+            lv_scr_load_anim(screenSources, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
             refresh_status_bar();
             break;
     }
@@ -1075,7 +1189,6 @@ static void on_browser_pick(lv_event_t *e)
     const char *name = browser_entries[idx];
 
     if (browser_is_dir[idx]) {
-        // navigation: ".." goes up, anything else descends into the named child
         char next[BROWSER_PATH_LEN];
         if (strcmp(name, "..") == 0)  path_parent(next, sizeof(next), browser_cwd);
         else                           path_join(next, sizeof(next), browser_cwd, name);
@@ -1084,9 +1197,20 @@ static void on_browser_pick(lv_event_t *e)
         return;
     }
 
-    // file: build the full path and start playback
-    static char path[BROWSER_PATH_LEN];
+    // file: build full path, load playlist, play
+    static char path[PATH_LEN + BROWSER_PATH_LEN];
     path_join(path, sizeof(path), browser_cwd, name);
+
+    // Load playlist from this folder
+    playlist_load(browser_cwd);
+    // Find this file in the playlist
+    for (int i = 0; i < s_pl_count; i++) {
+        if (strcmp(s_pl_files[i], name) == 0) {
+            s_pl_idx = i;
+            break;
+        }
+    }
+
     audioConnecttoSD(path);
     set_track(path, true);
     lv_scr_load_anim(screenPlayer, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
@@ -1102,6 +1226,10 @@ static void on_radio_pick(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= radio_count) return;
+    // Radio streams don't have a playlist folder
+    s_pl_count = 0;
+    s_pl_idx = -1;
+    s_pl_dir[0] = 0;
     audioConnecttohost(radio_presets[idx].url);
     set_track(radio_presets[idx].label, true);
     lv_scr_load_anim(screenPlayer, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
@@ -1112,6 +1240,9 @@ static void on_tts_pick(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= tts_count) return;
+    s_pl_count = 0;
+    s_pl_idx = -1;
+    s_pl_dir[0] = 0;
     audioConnecttoSpeech(tts_phrases[idx].text, tts_phrases[idx].lang);
     set_track(tts_phrases[idx].label, true);
     lv_scr_load_anim(screenPlayer, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
@@ -1152,7 +1283,6 @@ void setVuMeters(uint32_t vuRL)
     if (vuR) lv_bar_set_value(vuR, r, LV_ANIM_OFF);
 }
 
-// Audio library hooks (referenced by CYD_Audio lib via weak callbacks)
 void audio_info(const char *s) { Serial.printf("%s\r\n", s); }
 void audio_eof_mp3(const char *info)
 {
