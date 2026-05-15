@@ -4,10 +4,8 @@
  *
  *   Screens:
  *     - screenPlayer    : disc + vertical VU, track info, volume, transport
- *     - screenSources   : SD files / Radio / TTS / Settings picker
+ *     - screenSources   : SD files / Settings picker
  *     - screenBrowser   : list of audio files on the SD card
- *     - screenRadio     : hard-coded internet radio presets
- *     - screenTTS       : TTS phrase shortcuts
  *     - screenSettings  : system info, LDR readout, WiFi reset
  *
  *   Aesthetic: black background, neon/arcade accent colours,
@@ -44,8 +42,6 @@ extern const lv_font_t UbuntuCond36;
 static lv_obj_t *screenPlayer;
 static lv_obj_t *screenSources;
 static lv_obj_t *screenBrowser;
-static lv_obj_t *screenRadio;
-static lv_obj_t *screenTTS;
 static lv_obj_t *screenSettings;
 
 // ---------------- player widgets -------------------------------------------
@@ -77,6 +73,7 @@ static lv_timer_t *tmrVu;
 static lv_timer_t *tmrStatus;
 static lv_timer_t *tmrSettings;
 static lv_timer_t *tmrDisc;
+static lv_timer_t *tmrPlistLoad;
 
 // ---------------- shared styles --------------------------------------------
 static lv_style_t st_scr;
@@ -111,12 +108,29 @@ static lv_obj_t   *lblPlayMode = NULL;
 static volatile bool s_track_ended = false;  // set by audio callback, consumed by LVGL timer
 static bool s_vol_visible = false;
 
+// ---- saved playlists ----
+#define PL_SAVED_MAX  4
+#define PL_ENTRY_MAX  32
+#define PL_PATH_LEN   128
+
+struct saved_playlist_t {
+    char paths[PL_ENTRY_MAX][PL_PATH_LEN];
+    int  count;
+};
+static saved_playlist_t s_plists[PL_SAVED_MAX];
+static lv_obj_t *btnPlIcon[PL_SAVED_MAX];   // player screen playlist icons
+static lv_obj_t *lblPlCount[PL_SAVED_MAX];   // source screen count labels
+static bool s_pl_from_saved = false;         // true when playing from saved playlist
+static char s_pl_fullpaths[PLAYLIST_MAX][PL_PATH_LEN]; // full paths for saved-playlist mode
+
+static const char *pl_names[PL_SAVED_MAX] = { "Favorites", "Mix", "X-List", "Circle" };
+static const char *pl_syms[PL_SAVED_MAX]   = { "A", "B", "X", "Y" };
+static const lv_color_t pl_colors[PL_SAVED_MAX] = { COL_PINK, COL_GREEN, COL_TXT, lv_color_hex(0x4488ff) };
+
 // ---------------- forward decls --------------------------------------------
 static void build_player(void);
 static void build_sources(void);
 static void build_browser(void);
-static void build_radio(void);
-static void build_tts(void);
 static void build_settings(void);
 
 static void playlist_load(const char *dirpath);
@@ -137,8 +151,6 @@ static void on_vol_change(lv_event_t *e);
 static void on_transport(lv_event_t *e);
 static void on_source_pick(lv_event_t *e);
 static void on_browser_pick(lv_event_t *e);
-static void on_radio_pick(lv_event_t *e);
-static void on_tts_pick(lv_event_t *e);
 static void on_back_to_player(lv_event_t *e);
 static void on_back_to_sources(lv_event_t *e);
 static void on_settings_action(lv_event_t *e);
@@ -146,6 +158,14 @@ static void on_browser_refresh(lv_event_t *e);
 static void on_play_mode(lv_event_t *e);
 static void on_source_tap(lv_event_t *e);
 static void advance_track(void);
+static void on_plist_source_pick(lv_event_t *e);
+static void on_plist_add_track(lv_event_t *e);
+static void plists_refresh_player_icons(void);
+static void plists_refresh_source_labels(void);
+static void plist_play(int pl_idx);
+static bool plist_save(int pl_idx);
+static void plists_load_all(void);
+static void cb_plist_load(lv_timer_t *t);
 
 static void browser_populate(lv_obj_t *list);
 static void sysinfo_text(char *buf, size_t n);
@@ -220,28 +240,25 @@ void gui_init(void)
     screenPlayer   = lv_obj_create(NULL);
     screenSources  = lv_obj_create(NULL);
     screenBrowser  = lv_obj_create(NULL);
-    screenRadio    = lv_obj_create(NULL);
-    screenTTS      = lv_obj_create(NULL);
     screenSettings = lv_obj_create(NULL);
 
     lv_obj_add_style(screenPlayer,   &st_scr, 0);
     lv_obj_add_style(screenSources,  &st_scr, 0);
     lv_obj_add_style(screenBrowser,  &st_scr, 0);
-    lv_obj_add_style(screenRadio,    &st_scr, 0);
-    lv_obj_add_style(screenTTS,      &st_scr, 0);
     lv_obj_add_style(screenSettings, &st_scr, 0);
 
     build_player();
     build_sources();
     build_browser();
-    build_radio();
-    build_tts();
     build_settings();
 
     tmrVu       = lv_timer_create(cb_vu,       60,   NULL);
     tmrStatus   = lv_timer_create(cb_status,   1500, NULL);
     tmrSettings = lv_timer_create(cb_settings, 2000, NULL);
     tmrDisc     = lv_timer_create(cb_disc,     50,   NULL);
+
+    tmrPlistLoad = lv_timer_create(cb_plist_load, 2000, NULL);
+    lv_timer_set_repeat_count(tmrPlistLoad, 1);
 
     refresh_status_bar();
     lv_scr_load(screenPlayer);
@@ -286,8 +303,6 @@ static void add_status_bar(lv_obj_t *scr, lv_obj_t **lblLeft, lv_obj_t **lblRigh
 static lv_obj_t *sbP_l, *sbP_r, *sbP_m;
 static lv_obj_t *sbS_l, *sbS_r, *sbS_m;
 static lv_obj_t *sbB_l, *sbB_r, *sbB_m;
-static lv_obj_t *sbR_l, *sbR_r, *sbR_m;
-static lv_obj_t *sbT_l, *sbT_r, *sbT_m;
 static lv_obj_t *sbX_l, *sbX_r, *sbX_m;
 
 static void refresh_status_bar(void)
@@ -308,8 +323,6 @@ static void refresh_status_bar(void)
     if (active == screenPlayer)        { lv_label_set_text(sbP_l, left); lv_label_set_text(sbP_m, mid); }
     else if (active == screenSources)  { lv_label_set_text(sbS_l, left); lv_label_set_text(sbS_m, mid); }
     else if (active == screenBrowser)  { lv_label_set_text(sbB_l, left); lv_label_set_text(sbB_m, mid); }
-    else if (active == screenRadio)    { lv_label_set_text(sbR_l, left); lv_label_set_text(sbR_m, mid); }
-    else if (active == screenTTS)      { lv_label_set_text(sbT_l, left); lv_label_set_text(sbT_m, mid); }
     else if (active == screenSettings) { lv_label_set_text(sbX_l, left); lv_label_set_text(sbX_m, mid); }
 }
 
@@ -334,6 +347,7 @@ static void playlist_load(const char *dirpath)
 {
     s_pl_count = 0;
     s_pl_idx   = -1;
+    s_pl_from_saved = false;
     snprintf(s_pl_dir, sizeof(s_pl_dir), "%s", dirpath);
 
     File dir = SD.open(dirpath);
@@ -364,12 +378,17 @@ static void playlist_play_idx(int idx)
     if (idx < 0 || idx >= s_pl_count) return;
     s_pl_idx = idx;
     static char path[PATH_LEN + PATH_LEN];
-    if (strcmp(s_pl_dir, "/") == 0 || s_pl_dir[0] == 0)
-        snprintf(path, sizeof(path), "/%s", s_pl_files[idx]);
-    else
-        snprintf(path, sizeof(path), "%s/%s", s_pl_dir, s_pl_files[idx]);
+    if (s_pl_from_saved) {
+        snprintf(path, sizeof(path), "%s", s_pl_fullpaths[idx]);
+    } else {
+        if (strcmp(s_pl_dir, "/") == 0 || s_pl_dir[0] == 0)
+            snprintf(path, sizeof(path), "/%s", s_pl_files[idx]);
+        else
+            snprintf(path, sizeof(path), "%s/%s", s_pl_dir, s_pl_files[idx]);
+    }
     audioConnecttoSD(path);
     set_track(path, true);
+    plists_refresh_player_icons();
 }
 
 // ===========================================================================
@@ -401,12 +420,17 @@ static void build_player(void)
 {
     add_status_bar(screenPlayer, &sbP_l, &sbP_r, &sbP_m);
 
-    // ---- Invisible tap zone top-right -> opens Sources screen ----
-    lv_obj_t *srcTap = lv_obj_create(screenPlayer);
+    // ---- "..." button top-right -> opens Sources screen ----
+    lv_obj_t *srcTap = lv_btn_create(screenPlayer);
     lv_obj_remove_style_all(srcTap);
-    lv_obj_set_size(srcTap, 80, 24);
-    lv_obj_set_pos(srcTap, 240, 0);
+    lv_obj_set_size(srcTap, 40, 24);
+    lv_obj_set_pos(srcTap, 278, 0);
     lv_obj_clear_flag(srcTap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *srcLbl = lv_label_create(srcTap);
+    lv_label_set_text(srcLbl, "::::");
+    lv_obj_set_style_text_color(srcLbl, COL_TXT, 0);
+    lv_obj_set_style_text_font(srcLbl, &lv_font_montserrat_14, 0);
+    lv_obj_center(srcLbl);
     lv_obj_add_event_cb(srcTap, on_source_tap, LV_EVENT_CLICKED, NULL);
 
     // ---- Spinning disc (top-left) ----
@@ -477,6 +501,36 @@ static void build_player(void)
     lv_obj_set_pos(lblFolder, 128, 108);
     lv_label_set_text(lblFolder, "");
 
+    // ---- playlist icon buttons (below folder label) ----
+    for (int i = 0; i < PL_SAVED_MAX; i++) {
+        lv_obj_t *btn = lv_btn_create(screenPlayer);
+        lv_obj_remove_style_all(btn);
+        lv_obj_set_size(btn, 30, 30);
+        lv_obj_set_pos(btn, 128 + i * 38, 130);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, pl_syms[i]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lbl, pl_colors[i], 0);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 0);
+
+        lv_obj_t *line = lv_obj_create(btn);
+        lv_obj_remove_style_all(line);
+        lv_obj_set_size(line, 20, 2);
+        lv_obj_align(line, LV_ALIGN_BOTTOM_MID, 0, -8);
+        lv_obj_set_style_bg_color(line, pl_colors[i], 0);
+        lv_obj_set_style_bg_opa(line, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_radius(line, 0, 0);
+        lv_obj_clear_flag(line, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(line, LV_OBJ_FLAG_HIDDEN);
+
+        lv_obj_add_event_cb(btn, on_plist_add_track, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        btnPlIcon[i] = btn;
+    }
+
     // ---- Volume slider (vertical, right side, hidden by default) ----
     volTag = lv_label_create(screenPlayer);
     lv_obj_set_style_text_color(volTag, COL_TXT, 0);
@@ -536,16 +590,17 @@ static void build_player(void)
     lv_obj_set_style_border_width(tbar, 0, 0);
     lv_obj_clear_flag(tbar, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Progress bar as top line of transport area
+    // Progress bar: gray border box, green fill grows left to right
     barProgress = lv_bar_create(tbar);
     lv_obj_remove_style_all(barProgress);
     lv_obj_add_style(barProgress, &st_vu_bg, LV_PART_MAIN);
-    lv_obj_set_size(barProgress, 320, 3);
-    lv_obj_set_pos(barProgress, 0, 0);
+    lv_obj_set_style_pad_all(barProgress, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_side(barProgress, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+    lv_obj_set_size(barProgress, 310, 7);
+    lv_obj_align(barProgress, LV_ALIGN_TOP_MID, 0, 2);
     lv_bar_set_range(barProgress, 0, 100);
     lv_bar_set_value(barProgress, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(barProgress, COL_PINK, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(barProgress, 0, LV_PART_INDICATOR);
+    lv_obj_add_style(barProgress, &st_vu_indic, LV_PART_INDICATOR);
 
     // transport idx: 1=PREV, 2=PLAY/PAUSE, 3=NEXT, 4=FOLDER, 5=VOL (MODE has own handler)
     // Play mode button leftmost (cycles: loop all -> shuffle -> repeat one)
@@ -671,10 +726,37 @@ static void build_sources(void)
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 30);
     lv_label_set_text(title, "PICK A SOURCE");
 
-    make_big_btn(screenSources, LV_SYMBOL_SD_CARD,  "SD FILES",  8,   56, 148, 70, 0, on_source_pick, COL_GREEN);
-    make_big_btn(screenSources, LV_SYMBOL_AUDIO,    "RADIO",     164, 56, 148, 70, 1, on_source_pick, COL_GREEN);
-    make_big_btn(screenSources, LV_SYMBOL_KEYBOARD, "SPEECH",    8,   132,148, 70, 2, on_source_pick, COL_PINK);
-    make_big_btn(screenSources, LV_SYMBOL_SETTINGS, "SETTINGS",  164, 132,148, 70, 3, on_source_pick, COL_GREEN);
+    // ---- playlist rows ----
+    for (int i = 0; i < PL_SAVED_MAX; i++) {
+        lv_obj_t *row = lv_btn_create(screenSources);
+        lv_obj_remove_style_all(row);
+        lv_obj_add_style(row, &st_btn, 0);
+        lv_obj_add_style(row, &st_btn_pressed, LV_STATE_PRESSED);
+        lv_obj_set_size(row, 304, 24);
+        lv_obj_set_pos(row, 8, 50 + i * 28);
+        lv_obj_set_style_border_color(row, pl_colors[i], 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *icon = lv_label_create(row);
+        lv_label_set_text(icon, pl_syms[i]);
+        lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(icon, pl_colors[i], 0);
+        lv_obj_align(icon, LV_ALIGN_LEFT_MID, 6, 0);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_label_set_text_fmt(lbl, "%s (%d)", pl_names[i], s_plists[i].count);
+        lv_obj_set_style_text_font(lbl, &UbuntuCond14, 0);
+        lv_obj_set_style_text_color(lbl, COL_TXT, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 28, 0);
+        lblPlCount[i] = lbl;
+
+        lv_obj_add_event_cb(row, on_plist_source_pick, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
+
+    make_big_btn(screenSources, LV_SYMBOL_SD_CARD,  "SD FILES",  8,   164, 148, 50, 0, on_source_pick, COL_GREEN);
+    make_big_btn(screenSources, LV_SYMBOL_SETTINGS, "SETTINGS",  164, 164, 148, 50, 1, on_source_pick, COL_GREEN);
 
     lv_obj_t *back = lv_btn_create(screenSources);
     lv_obj_remove_style_all(back);
@@ -719,6 +801,103 @@ static void path_parent(char *out, size_t cap, const char *p)
     if (!slash) { out[0] = '/'; out[1] = 0; return; }
     if (slash == out) { out[1] = 0; return; }
     *slash = 0;
+}
+
+// ---- playlist JSON helpers ----
+static int pl_json_parse(const char *json, int json_len, char out[][PL_PATH_LEN], int max_entries)
+{
+    int count = 0;
+    int i = 0;
+    while (i < json_len && json[i] != '[') i++;
+    if (i >= json_len) return 0;
+    i++; // skip '['
+    while (i < json_len && count < max_entries) {
+        while (i < json_len && (json[i]==' '||json[i]==','||json[i]=='\n'||json[i]=='\r'||json[i]=='\t')) i++;
+        if (i >= json_len || json[i] == ']') break;
+        if (json[i] != '"') { i++; continue; }
+        i++; // skip opening quote
+        int p = 0;
+        while (i < json_len && json[i] != '"' && p < PL_PATH_LEN - 1) {
+            if (json[i] == '\\' && i + 1 < json_len) {
+                i++;
+                if (json[i] == '"' || json[i] == '\\') { out[count][p++] = json[i++]; }
+                else if (json[i] == 'n') { out[count][p++] = '\n'; i++; }
+                else { out[count][p++] = json[i++]; }
+            } else {
+                out[count][p++] = json[i++];
+            }
+        }
+        out[count][p] = 0;
+        if (p > 0) count++;
+        if (i < json_len && json[i] == '"') i++;
+    }
+    return count;
+}
+
+static int pl_json_serialize(char *buf, int buf_size, char paths[][PL_PATH_LEN], int count)
+{
+    int pos = 0;
+    buf[pos++] = '[';
+    for (int i = 0; i < count && pos < buf_size - 4; i++) {
+        if (i > 0) buf[pos++] = ',';
+        buf[pos++] = '"';
+        for (const char *s = paths[i]; *s && pos < buf_size - 4; s++) {
+            if (*s == '"' || *s == '\\') buf[pos++] = '\\';
+            buf[pos++] = *s;
+        }
+        buf[pos++] = '"';
+    }
+    buf[pos++] = ']';
+    buf[pos] = 0;
+    return pos;
+}
+
+static bool plist_save(int pl_idx)
+{
+    if (pl_idx < 0 || pl_idx >= PL_SAVED_MAX) return false;
+    char path[16];
+    snprintf(path, sizeof(path), "/pl/%d.json", pl_idx + 1);
+    char *buf = (char*)malloc(8192);
+    if (!buf) return false;
+    int len = pl_json_serialize(buf, 8192, s_plists[pl_idx].paths, s_plists[pl_idx].count);
+    File f = SD.open(path, FILE_WRITE);
+    if (!f) { free(buf); return false; }
+    f.print(buf);
+    f.close();
+    free(buf);
+    return true;
+}
+
+static void plists_load_all(void)
+{
+    if (SD.cardType() == CARD_NONE) return;
+    SD.mkdir("/pl");
+    for (int i = 0; i < PL_SAVED_MAX; i++) {
+        s_plists[i].count = 0;
+        memset(s_plists[i].paths, 0, sizeof(s_plists[i].paths));
+        char path[16];
+        snprintf(path, sizeof(path), "/pl/%d.json", i + 1);
+        if (!SD.exists(path)) continue;
+        File f = SD.open(path, "r");
+        if (!f) continue;
+        int fsize = f.size();
+        if (fsize > 8192) { f.close(); continue; }
+        char *buf = (char*)malloc(fsize + 1);
+        if (!buf) { f.close(); continue; }
+        int len = f.read((uint8_t*)buf, fsize);
+        buf[len] = 0;
+        f.close();
+        s_plists[i].count = pl_json_parse(buf, len, s_plists[i].paths, PL_ENTRY_MAX);
+        free(buf);
+    }
+    plists_refresh_source_labels();
+}
+
+static void cb_plist_load(lv_timer_t *t)
+{
+    plists_load_all();
+    lv_timer_del(tmrPlistLoad);
+    tmrPlistLoad = NULL;
 }
 
 static void browser_populate(lv_obj_t *list)
@@ -856,131 +1035,6 @@ static void build_browser(void)
 
 // ===========================================================================
 //                          R A D I O   S C R E E N
-// ===========================================================================
-typedef struct {
-    const char *label;
-    const char *url;
-} radio_entry_t;
-
-static const radio_entry_t radio_presets[] = {
-    { "Radio Paradise (FLAC)", "http://stream.radioparadise.com/flac" },
-    { "SomaFM Groove Salad",   "http://ice1.somafm.com/groovesalad-128-mp3" },
-    { "SomaFM Drone Zone",     "http://ice1.somafm.com/dronezone-128-mp3" },
-    { "BBC World Service",     "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service" },
-    { "Sample (Miss Marple)",  "https://github.com/schreibfaul1/ESP32-audioI2S/raw/master/additional_info/Testfiles/Miss-Marple.m4a" },
-};
-static const int radio_count = sizeof(radio_presets) / sizeof(radio_presets[0]);
-
-static void build_radio(void)
-{
-    add_status_bar(screenRadio, &sbR_l, &sbR_r, &sbR_m);
-
-    lv_obj_t *title = lv_label_create(screenRadio);
-    lv_obj_set_style_text_color(title, COL_GREEN, 0);
-    lv_obj_set_style_text_font(title, &UbuntuCond14, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 30);
-    lv_label_set_text(title, "RADIO PRESETS");
-
-    lv_obj_t *list = lv_list_create(screenRadio);
-    lv_obj_set_size(list, 304, 148);
-    lv_obj_align(list, LV_ALIGN_TOP_LEFT, 8, 48);
-    lv_obj_set_style_bg_color(list, COL_BG, 0);
-    lv_obj_set_style_border_color(list, COL_GRAY, 0);
-    lv_obj_set_style_border_width(list, 1, 0);
-    lv_obj_set_style_pad_all(list, 2, 0);
-    lv_obj_set_style_radius(list, 0, 0);
-
-    const lv_color_t r_accents[] = { COL_GREEN, COL_PINK, COL_TXT, COL_GREEN, COL_PINK };
-    for (int i = 0; i < radio_count; i++) {
-        lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_AUDIO, radio_presets[i].label);
-        lv_color_t a = r_accents[i % 5];
-        lv_obj_set_style_bg_color(btn, i & 1 ? COL_PANEL : COL_BG, 0);
-        lv_obj_set_style_text_color(btn, a, 0);
-        lv_obj_set_style_text_font(btn, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_border_color(btn, a, 0);
-        lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
-        lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_add_event_cb(btn, on_radio_pick, LV_EVENT_CLICKED, (void*)(intptr_t)i);
-    }
-
-    lv_obj_t *back = lv_btn_create(screenRadio);
-    lv_obj_remove_style_all(back);
-    lv_obj_add_style(back, &st_btn, 0);
-    lv_obj_add_style(back, &st_btn_pressed, LV_STATE_PRESSED);
-    lv_obj_set_size(back, 88, 28);
-    lv_obj_align(back, LV_ALIGN_BOTTOM_LEFT, 8, -6);
-    lv_obj_t *bl = lv_label_create(back);
-    lv_label_set_text(bl, LV_SYMBOL_LEFT " BACK");
-    lv_obj_center(bl);
-    lv_obj_add_event_cb(back, on_back_to_sources, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_clear_flag(screenRadio, LV_OBJ_FLAG_SCROLLABLE);
-}
-
-// ===========================================================================
-//                           T T S   S C R E E N
-// ===========================================================================
-typedef struct {
-    const char *label;
-    const char *text;
-    const char *lang;
-} tts_entry_t;
-
-static const tts_entry_t tts_phrases[] = {
-    { "Greeting",       "Welcome to cheap yellow display",            "en" },
-    { "Stock audio",    "Stock audio system, no modification",        "en" },
-    { "I2S mod",        "Audio I2S modification installed",           "en" },
-    { "PSRAM mod",      "PSRAM modification installed",               "en" },
-    { "Time check",     "It is time to listen to some music",         "en" },
-};
-static const int tts_count = sizeof(tts_phrases) / sizeof(tts_phrases[0]);
-
-static void build_tts(void)
-{
-    add_status_bar(screenTTS, &sbT_l, &sbT_r, &sbT_m);
-
-    lv_obj_t *title = lv_label_create(screenTTS);
-    lv_obj_set_style_text_color(title, COL_PINK, 0);
-    lv_obj_set_style_text_font(title, &UbuntuCond14, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 30);
-    lv_label_set_text(title, "SPEECH SYNTHESIS");
-
-    lv_obj_t *list = lv_list_create(screenTTS);
-    lv_obj_set_size(list, 304, 148);
-    lv_obj_align(list, LV_ALIGN_TOP_LEFT, 8, 48);
-    lv_obj_set_style_bg_color(list, COL_BG, 0);
-    lv_obj_set_style_border_color(list, COL_GRAY, 0);
-    lv_obj_set_style_border_width(list, 1, 0);
-    lv_obj_set_style_pad_all(list, 2, 0);
-    lv_obj_set_style_radius(list, 0, 0);
-
-    const lv_color_t t_accents[] = { COL_PINK, COL_GREEN, COL_TXT, COL_PINK, COL_GREEN };
-    for (int i = 0; i < tts_count; i++) {
-        lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_KEYBOARD, tts_phrases[i].label);
-        lv_color_t a = t_accents[i % 5];
-        lv_obj_set_style_bg_color(btn, i & 1 ? COL_PANEL : COL_BG, 0);
-        lv_obj_set_style_text_color(btn, a, 0);
-        lv_obj_set_style_text_font(btn, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_border_color(btn, a, 0);
-        lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
-        lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_add_event_cb(btn, on_tts_pick, LV_EVENT_CLICKED, (void*)(intptr_t)i);
-    }
-
-    lv_obj_t *back = lv_btn_create(screenTTS);
-    lv_obj_remove_style_all(back);
-    lv_obj_add_style(back, &st_btn, 0);
-    lv_obj_add_style(back, &st_btn_pressed, LV_STATE_PRESSED);
-    lv_obj_set_size(back, 88, 28);
-    lv_obj_align(back, LV_ALIGN_BOTTOM_LEFT, 8, -6);
-    lv_obj_t *bl = lv_label_create(back);
-    lv_label_set_text(bl, LV_SYMBOL_LEFT " BACK");
-    lv_obj_center(bl);
-    lv_obj_add_event_cb(back, on_back_to_sources, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_clear_flag(screenTTS, LV_OBJ_FLAG_SCROLLABLE);
-}
-
 // ===========================================================================
 //                      S E T T I N G S / D I A G   S C R E E N
 // ===========================================================================
@@ -1146,6 +1200,7 @@ static void set_track(const char *name, bool playing)
     if (lblTimeElapsed) lv_label_set_text(lblTimeElapsed, "0:00");
     if (lblTimeDuration) lv_label_set_text(lblTimeDuration, "0:00");
     update_play_pause_btn();
+    plists_refresh_player_icons();
 }
 
 static void update_play_pause_btn(void)
@@ -1365,12 +1420,6 @@ static void on_source_pick(lv_event_t *e)
             lv_scr_load_anim(screenBrowser, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
             break;
         case 1:
-            lv_scr_load_anim(screenRadio, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
-            break;
-        case 2:
-            lv_scr_load_anim(screenTTS, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
-            break;
-        case 3:
             lv_scr_load_anim(screenSettings, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
             break;
     }
@@ -1417,32 +1466,6 @@ static void on_browser_refresh(lv_event_t *e)
     browser_populate(browserList);
 }
 
-static void on_radio_pick(lv_event_t *e)
-{
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx < 0 || idx >= radio_count) return;
-    // Radio streams don't have a playlist folder
-    s_pl_count = 0;
-    s_pl_idx = -1;
-    s_pl_dir[0] = 0;
-    audioConnecttohost(radio_presets[idx].url);
-    set_track(radio_presets[idx].label, true);
-    lv_scr_load_anim(screenPlayer, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
-    refresh_status_bar();
-}
-
-static void on_tts_pick(lv_event_t *e)
-{
-    int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx < 0 || idx >= tts_count) return;
-    s_pl_count = 0;
-    s_pl_idx = -1;
-    s_pl_dir[0] = 0;
-    audioConnecttoSpeech(tts_phrases[idx].text, tts_phrases[idx].lang);
-    set_track(tts_phrases[idx].label, true);
-    lv_scr_load_anim(screenPlayer, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
-    refresh_status_bar();
-}
 
 static void on_back_to_player(lv_event_t *e)
 {
@@ -1454,6 +1477,108 @@ static void on_back_to_sources(lv_event_t *e)
 {
     lv_scr_load_anim(screenSources, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
     refresh_status_bar();
+}
+
+static void plist_play(int pl_idx)
+{
+    if (pl_idx < 0 || pl_idx >= PL_SAVED_MAX) return;
+    saved_playlist_t *pl = &s_plists[pl_idx];
+    if (pl->count == 0) return;
+
+    s_pl_count = 0;
+    s_pl_idx = 0;
+    for (int i = 0; i < pl->count && i < PLAYLIST_MAX; i++) {
+        const char *full = pl->paths[i];
+        const char *base = strrchr(full, '/');
+        if (base) base++; else base = full;
+        strncpy(s_pl_files[i], base, PATH_LEN - 1);
+        s_pl_files[i][PATH_LEN - 1] = 0;
+        strncpy(s_pl_fullpaths[i], full, PL_PATH_LEN - 1);
+        s_pl_fullpaths[i][PL_PATH_LEN - 1] = 0;
+        if (i == 0) {
+            char dir[PL_PATH_LEN];
+            strncpy(dir, full, sizeof(dir) - 1);
+            dir[sizeof(dir) - 1] = 0;
+            char *sl = strrchr(dir, '/');
+            if (sl) *sl = 0; else strcpy(dir, "/");
+            strncpy(s_pl_dir, dir, PATH_LEN - 1);
+            s_pl_dir[PATH_LEN - 1] = 0;
+        }
+        s_pl_count++;
+    }
+    s_pl_from_saved = true;
+    playlist_play_idx(0);
+    lv_scr_load_anim(screenPlayer, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    refresh_status_bar();
+}
+
+static void on_plist_source_pick(lv_event_t *e)
+{
+    int pl_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    plist_play(pl_idx);
+}
+
+static void on_plist_add_track(lv_event_t *e)
+{
+    int pl_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (pl_idx < 0 || pl_idx >= PL_SAVED_MAX) return;
+    if (!s_track[0]) return;
+
+    saved_playlist_t *pl = &s_plists[pl_idx];
+    // toggle: remove if already in list, add if not
+    for (int i = 0; i < pl->count; i++) {
+        if (strcmp(pl->paths[i], s_track) == 0) {
+            // remove
+            for (int j = i; j < pl->count - 1; j++)
+                strncpy(pl->paths[j], pl->paths[j+1], PL_PATH_LEN);
+            pl->paths[pl->count - 1][0] = 0;
+            pl->count--;
+            plist_save(pl_idx);
+            plists_refresh_player_icons();
+            plists_refresh_source_labels();
+            return;
+        }
+    }
+    // add
+    if (pl->count >= PL_ENTRY_MAX) return;
+    strncpy(pl->paths[pl->count], s_track, PL_PATH_LEN - 1);
+    pl->paths[pl->count][PL_PATH_LEN - 1] = 0;
+    pl->count++;
+    plist_save(pl_idx);
+    plists_refresh_player_icons();
+    plists_refresh_source_labels();
+}
+
+static void plists_refresh_player_icons(void)
+{
+    for (int i = 0; i < PL_SAVED_MAX; i++) {
+        if (!btnPlIcon[i]) continue;
+        bool in_list = false;
+        if (s_track[0]) {
+            for (int j = 0; j < s_plists[i].count; j++) {
+                if (strcmp(s_plists[i].paths[j], s_track) == 0) {
+                    in_list = true;
+                    break;
+                }
+            }
+        }
+        // child 0 = label, child 1 = underline line
+        lv_obj_t *line = lv_obj_get_child(btnPlIcon[i], 1);
+        if (in_list) {
+            lv_obj_clear_flag(line, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
+        } else {
+            lv_obj_add_flag(line, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void plists_refresh_source_labels(void)
+{
+    for (int i = 0; i < PL_SAVED_MAX; i++) {
+        if (!lblPlCount[i]) continue;
+        lv_label_set_text_fmt(lblPlCount[i], "%s (%d)", pl_names[i], s_plists[i].count);
+    }
 }
 
 static void on_settings_action(lv_event_t *e)
