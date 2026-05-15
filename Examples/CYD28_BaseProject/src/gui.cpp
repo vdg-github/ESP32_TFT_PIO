@@ -29,25 +29,16 @@ extern const lv_font_t UbuntuCond11;
 extern const lv_font_t UbuntuCond14;
 extern const lv_font_t UbuntuCond36;
 
-// ---------------- 8-bit / arcade palette -----------------------------------
-#define COL_BG          lv_color_hex(0x0a0820)
-#define COL_BG_BAR      lv_color_hex(0x05030f)
-#define COL_PANEL       lv_color_hex(0x100a30)
-#define COL_PANEL_BRD   lv_color_hex(0x4a30a0)
-#define COL_TXT         lv_color_hex(0xfff8e8)
-#define COL_TXT_DIM     lv_color_hex(0x9080d0)
-#define COL_RED         lv_color_hex(0xff2244)
-#define COL_ORANGE      lv_color_hex(0xff7800)
-#define COL_YELLOW      lv_color_hex(0xffd000)
-#define COL_LIME        lv_color_hex(0x70ff20)
-#define COL_GREEN       lv_color_hex(0x00d040)
-#define COL_CYAN        lv_color_hex(0x00e8ff)
-#define COL_BLUE        lv_color_hex(0x2080ff)
-#define COL_MAGENTA     lv_color_hex(0xff30d0)
-#define COL_PINK        lv_color_hex(0xff5a8e)
-#define COL_PURPLE      lv_color_hex(0x9040ff)
-#define COL_AMBER       COL_YELLOW
-#define COL_AMBER_DIM   lv_color_hex(0x4a30a0)
+// ---------------- neon palette: green, pink, black, white, gray ---------------
+#define COL_BG          lv_color_hex(0x000000)
+#define COL_BG_BAR      lv_color_hex(0x000000)
+#define COL_PANEL       lv_color_hex(0x111111)
+#define COL_PANEL_BRD   lv_color_hex(0x333333)
+#define COL_TXT         lv_color_hex(0xffffff)
+#define COL_TXT_DIM     lv_color_hex(0x808080)
+#define COL_GREEN       lv_color_hex(0x39ff14)
+#define COL_PINK        lv_color_hex(0xff1493)
+#define COL_GRAY        lv_color_hex(0x555555)
 
 // ---------------- screens --------------------------------------------------
 static lv_obj_t *screenPlayer;
@@ -69,8 +60,12 @@ static lv_obj_t *vuL;
 static lv_obj_t *vuR;
 static lv_obj_t *volSlider;
 static lv_obj_t *lblVol;
+static lv_obj_t *volTag;
 static lv_obj_t *btnPlayPause;
 static lv_obj_t *lblPlayPause;
+static lv_obj_t *barProgress;
+static lv_obj_t *lblTimeElapsed;
+static lv_obj_t *lblTimeDuration;
 
 // ---------------- spinning disc --------------------------------------------
 LV_IMG_DECLARE(disc_img);
@@ -104,6 +99,17 @@ static char  s_pl_dir[PATH_LEN]  = "";  // folder of current track
 static char  s_pl_files[PLAYLIST_MAX][PATH_LEN]; // filenames only
 static int   s_pl_count     = 0;
 static int   s_pl_idx       = -1;     // -1 = no track selected
+static uint32_t s_frame_cnt  = 0;
+static uint32_t s_fps_tick   = 0;
+static uint32_t s_fps_val    = 0;
+
+// ---- play mode: 0=loop all, 1=shuffle, 2=repeat one ----
+typedef enum { PM_LOOP_ALL = 0, PM_SHUFFLE = 1, PM_REPEAT_ONE = 2 } play_mode_t;
+static play_mode_t s_play_mode = PM_LOOP_ALL;
+static lv_obj_t   *btnPlayMode = NULL;
+static lv_obj_t   *lblPlayMode = NULL;
+static volatile bool s_track_ended = false;  // set by audio callback, consumed by LVGL timer
+static bool s_vol_visible = false;
 
 // ---------------- forward decls --------------------------------------------
 static void build_player(void);
@@ -125,6 +131,8 @@ static void cb_status(lv_timer_t *t);
 static void cb_settings(lv_timer_t *t);
 static void cb_disc(lv_timer_t *t);
 
+static void fmt_time(uint32_t secs, char *buf, size_t n);
+
 static void on_vol_change(lv_event_t *e);
 static void on_transport(lv_event_t *e);
 static void on_source_pick(lv_event_t *e);
@@ -135,6 +143,9 @@ static void on_back_to_player(lv_event_t *e);
 static void on_back_to_sources(lv_event_t *e);
 static void on_settings_action(lv_event_t *e);
 static void on_browser_refresh(lv_event_t *e);
+static void on_play_mode(lv_event_t *e);
+static void on_source_tap(lv_event_t *e);
+static void advance_track(void);
 
 static void browser_populate(lv_obj_t *list);
 static void sysinfo_text(char *buf, size_t n);
@@ -162,37 +173,35 @@ static void init_styles(void)
     lv_style_set_text_color(&st_panel, COL_TXT);
 
     lv_style_init(&st_vu_bg);
-    lv_style_set_bg_color(&st_vu_bg, lv_color_hex(0x0a0a0a));
+    lv_style_set_bg_color(&st_vu_bg, COL_BG);
     lv_style_set_bg_opa(&st_vu_bg, LV_OPA_COVER);
-    lv_style_set_border_color(&st_vu_bg, COL_AMBER_DIM);
+    lv_style_set_border_color(&st_vu_bg, COL_GRAY);
     lv_style_set_border_width(&st_vu_bg, 1);
     lv_style_set_radius(&st_vu_bg, 0);
 
     lv_style_init(&st_vu_indic);
     lv_style_set_bg_opa(&st_vu_indic, LV_OPA_COVER);
     lv_style_set_bg_color(&st_vu_indic, COL_GREEN);
-    lv_style_set_bg_grad_color(&st_vu_indic, COL_RED);
-    lv_style_set_bg_grad_dir(&st_vu_indic, LV_GRAD_DIR_VER);
     lv_style_set_radius(&st_vu_indic, 0);
 
     lv_style_init(&st_btn);
-    lv_style_set_bg_color(&st_btn, lv_color_hex(0x141414));
+    lv_style_set_bg_color(&st_btn, COL_BG);
     lv_style_set_bg_opa(&st_btn, LV_OPA_COVER);
-    lv_style_set_border_color(&st_btn, COL_AMBER);
+    lv_style_set_border_color(&st_btn, COL_GREEN);
     lv_style_set_border_width(&st_btn, 1);
     lv_style_set_radius(&st_btn, 2);
-    lv_style_set_text_color(&st_btn, COL_AMBER);
+    lv_style_set_text_color(&st_btn, COL_GREEN);
     lv_style_set_text_font(&st_btn, &lv_font_montserrat_14);
     lv_style_set_pad_all(&st_btn, 4);
 
     lv_style_init(&st_btn_pressed);
-    lv_style_set_bg_color(&st_btn_pressed, COL_AMBER);
+    lv_style_set_bg_color(&st_btn_pressed, COL_GREEN);
     lv_style_set_text_color(&st_btn_pressed, lv_color_hex(0x000000));
 
     lv_style_init(&st_chip);
-    lv_style_set_bg_color(&st_chip, lv_color_hex(0x101010));
+    lv_style_set_bg_color(&st_chip, COL_BG);
     lv_style_set_bg_opa(&st_chip, LV_OPA_COVER);
-    lv_style_set_border_color(&st_chip, COL_AMBER_DIM);
+    lv_style_set_border_color(&st_chip, COL_GRAY);
     lv_style_set_border_width(&st_chip, 1);
     lv_style_set_radius(&st_chip, 12);
     lv_style_set_text_color(&st_chip, COL_TXT);
@@ -247,30 +256,30 @@ static void add_status_bar(lv_obj_t *scr, lv_obj_t **lblLeft, lv_obj_t **lblRigh
     lv_obj_remove_style_all(bar);
     lv_obj_set_size(bar, 320, 24);
     lv_obj_set_pos(bar, 0, 0);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x100c00), 0);
+    lv_obj_set_style_bg_color(bar, COL_BG, 0);
     lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(bar, COL_MAGENTA, 0);
+    lv_obj_set_style_border_color(bar, COL_GRAY, 0);
     lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_BOTTOM, 0);
     lv_obj_set_style_border_width(bar, 1, 0);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
     *lblLeft = lv_label_create(bar);
-    lv_obj_set_style_text_color(*lblLeft, COL_CYAN, 0);
+    lv_obj_set_style_text_color(*lblLeft, COL_TXT, 0);
     lv_obj_set_style_text_font(*lblLeft, &lv_font_montserrat_14, 0);
     lv_obj_align(*lblLeft, LV_ALIGN_LEFT_MID, 6, 0);
     lv_label_set_text(*lblLeft, LV_SYMBOL_WIFI " ---");
 
     *lblMid = lv_label_create(bar);
-    lv_obj_set_style_text_color(*lblMid, COL_PINK, 0);
+    lv_obj_set_style_text_color(*lblMid, COL_TXT_DIM, 0);
     lv_obj_set_style_text_font(*lblMid, &UbuntuCond14, 0);
     lv_obj_align(*lblMid, LV_ALIGN_CENTER, 0, 0);
-    lv_label_set_text(*lblMid, "CYD28 PLAYER");
+    lv_label_set_text(*lblMid, "");
 
     *lblRight = lv_label_create(bar);
-    lv_obj_set_style_text_color(*lblRight, COL_LIME, 0);
+    lv_obj_set_style_text_color(*lblRight, COL_TXT, 0);
     lv_obj_set_style_text_font(*lblRight, &UbuntuCond14, 0);
     lv_obj_align(*lblRight, LV_ALIGN_RIGHT_MID, -6, 0);
-    lv_label_set_text(*lblRight, "--");
+    lv_label_set_text(*lblRight, "");
 }
 
 // ---- per-screen status bar handles ----
@@ -284,7 +293,7 @@ static lv_obj_t *sbX_l, *sbX_r, *sbX_m;
 static void refresh_status_bar(void)
 {
     char left[40];
-    char right[40];
+    char mid[40];
 
     if (WiFi.status() == WL_CONNECTED) {
         IPAddress ip = WiFi.localIP();
@@ -293,15 +302,15 @@ static void refresh_status_bar(void)
     } else {
         snprintf(left, sizeof(left), LV_SYMBOL_WIFI " offline");
     }
-    snprintf(right, sizeof(right), "%uk free", (unsigned)(ESP.getFreeHeap() / 1024));
+    snprintf(mid, sizeof(mid), "%u fps  %luk free", s_fps_val, (unsigned)(ESP.getFreeHeap() / 1024));
 
     lv_obj_t *active = lv_scr_act();
-    if (active == screenPlayer)        { lv_label_set_text(sbP_l, left); lv_label_set_text(sbP_r, right); }
-    else if (active == screenSources)  { lv_label_set_text(sbS_l, left); lv_label_set_text(sbS_r, right); }
-    else if (active == screenBrowser)  { lv_label_set_text(sbB_l, left); lv_label_set_text(sbB_r, right); }
-    else if (active == screenRadio)    { lv_label_set_text(sbR_l, left); lv_label_set_text(sbR_r, right); }
-    else if (active == screenTTS)      { lv_label_set_text(sbT_l, left); lv_label_set_text(sbT_r, right); }
-    else if (active == screenSettings) { lv_label_set_text(sbX_l, left); lv_label_set_text(sbX_r, right); }
+    if (active == screenPlayer)        { lv_label_set_text(sbP_l, left); lv_label_set_text(sbP_m, mid); }
+    else if (active == screenSources)  { lv_label_set_text(sbS_l, left); lv_label_set_text(sbS_m, mid); }
+    else if (active == screenBrowser)  { lv_label_set_text(sbB_l, left); lv_label_set_text(sbB_m, mid); }
+    else if (active == screenRadio)    { lv_label_set_text(sbR_l, left); lv_label_set_text(sbR_m, mid); }
+    else if (active == screenTTS)      { lv_label_set_text(sbT_l, left); lv_label_set_text(sbT_m, mid); }
+    else if (active == screenSettings) { lv_label_set_text(sbX_l, left); lv_label_set_text(sbX_m, mid); }
 }
 
 // ===========================================================================
@@ -373,7 +382,7 @@ static lv_obj_t *make_transport_btn(lv_obj_t *parent, const char *sym, int x_pct
     lv_obj_remove_style_all(b);
     lv_obj_add_style(b, &st_btn, 0);
     lv_obj_add_style(b, &st_btn_pressed, LV_STATE_PRESSED);
-    lv_obj_set_size(b, 56, 38);
+    lv_obj_set_size(b, 54, 34);
     lv_obj_align(b, LV_ALIGN_LEFT_MID, x_pct, 0);
     lv_obj_set_style_border_color(b, accent, 0);
     lv_obj_set_style_text_color(b, accent, 0);
@@ -392,25 +401,33 @@ static void build_player(void)
 {
     add_status_bar(screenPlayer, &sbP_l, &sbP_r, &sbP_m);
 
+    // ---- Invisible tap zone top-right -> opens Sources screen ----
+    lv_obj_t *srcTap = lv_obj_create(screenPlayer);
+    lv_obj_remove_style_all(srcTap);
+    lv_obj_set_size(srcTap, 80, 24);
+    lv_obj_set_pos(srcTap, 240, 0);
+    lv_obj_clear_flag(srcTap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(srcTap, on_source_tap, LV_EVENT_CLICKED, NULL);
+
     // ---- Spinning disc (top-left) ----
     imgDisc = lv_img_create(screenPlayer);
     lv_img_set_src(imgDisc, &disc_img);
-    lv_obj_set_pos(imgDisc, 4, 26);
+    lv_obj_set_pos(imgDisc, 4, 40);
     lv_img_set_pivot(imgDisc, 40, 40);
     lv_img_set_antialias(imgDisc, false);
     lv_img_set_angle(imgDisc, 0);
 
     // ---- VU labels (L / R) above bars, right of disc ----
     lv_obj_t *vuLlbl = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(vuLlbl, COL_CYAN, 0);
+    lv_obj_set_style_text_color(vuLlbl, COL_GREEN, 0);
     lv_obj_set_style_text_font(vuLlbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_pos(vuLlbl, 92, 26);
+    lv_obj_set_pos(vuLlbl, 94, 39);
     lv_label_set_text(vuLlbl, "L");
 
     lv_obj_t *vuRlbl = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(vuRlbl, COL_MAGENTA, 0);
+    lv_obj_set_style_text_color(vuRlbl, COL_PINK, 0);
     lv_obj_set_style_text_font(vuRlbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_pos(vuRlbl, 108, 26);
+    lv_obj_set_pos(vuRlbl, 110, 39);
     lv_label_set_text(vuRlbl, "R");
 
     // ---- Vertical VU bars (right of disc) ----
@@ -418,8 +435,9 @@ static void build_player(void)
     lv_obj_remove_style_all(vuL);
     lv_obj_add_style(vuL, &st_vu_bg, LV_PART_MAIN);
     lv_obj_add_style(vuL, &st_vu_indic, LV_PART_INDICATOR);
-    lv_obj_set_size(vuL, 14, 74);
-    lv_obj_set_pos(vuL, 92, 40);
+    lv_obj_set_size(vuL, 14, 78);
+    lv_obj_set_pos(vuL, 92, 54);
+    lv_obj_set_style_pad_all(vuL, 2, LV_PART_MAIN);
     lv_bar_set_range(vuL, 0, 100);
     lv_bar_set_value(vuL, 0, LV_ANIM_OFF);
 
@@ -427,91 +445,178 @@ static void build_player(void)
     lv_obj_remove_style_all(vuR);
     lv_obj_add_style(vuR, &st_vu_bg, LV_PART_MAIN);
     lv_obj_add_style(vuR, &st_vu_indic, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(vuR, COL_CYAN, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_grad_color(vuR, COL_MAGENTA, LV_PART_INDICATOR);
-    lv_obj_set_size(vuR, 14, 74);
-    lv_obj_set_pos(vuR, 108, 40);
+    lv_obj_set_style_bg_color(vuR, COL_PINK, LV_PART_INDICATOR);
+    lv_obj_set_size(vuR, 14, 78);
+    lv_obj_set_pos(vuR, 108, 54);
+    lv_obj_set_style_pad_all(vuR, 2, LV_PART_MAIN);
     lv_bar_set_range(vuR, 0, 100);
     lv_bar_set_value(vuR, 0, LV_ANIM_OFF);
 
-    // ---- Track info area (right of disc+VU, below status bar) ----
-    // "NOW PLAYING" header
+    // ---- Track info area (right of disc+VU) ----
     lblNowPlaying = lv_label_create(screenPlayer);
     lv_obj_set_style_text_color(lblNowPlaying, COL_PINK, 0);
     lv_obj_set_style_text_font(lblNowPlaying, &lv_font_montserrat_14, 0);
-    lv_obj_set_pos(lblNowPlaying, 128, 28);
+    lv_obj_set_pos(lblNowPlaying, 128, 50);
     lv_label_set_text(lblNowPlaying, LV_SYMBOL_PLAY " NOW PLAYING");
 
     // Track name (large, scrolling)
     lblTrack = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(lblTrack, COL_YELLOW, 0);
+    lv_obj_set_style_text_color(lblTrack, COL_GREEN, 0);
     lv_obj_set_style_text_font(lblTrack, &UbuntuCond36, 0);
     lv_obj_set_width(lblTrack, 184);
     lv_label_set_long_mode(lblTrack, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_pos(lblTrack, 128, 48);
+    lv_obj_set_pos(lblTrack, 128, 70);
     lv_label_set_text(lblTrack, "[ STANDBY ]");
 
-    // Folder / album name
+    // Folder name (no rectangle icon, just text)
     lblFolder = lv_label_create(screenPlayer);
     lv_obj_set_style_text_color(lblFolder, COL_TXT_DIM, 0);
     lv_obj_set_style_text_font(lblFolder, &UbuntuCond14, 0);
-    lv_obj_set_width(lblFolder, 184);
+    lv_obj_set_width(lblFolder, 140);
     lv_label_set_long_mode(lblFolder, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_pos(lblFolder, 128, 84);
+    lv_obj_set_pos(lblFolder, 128, 108);
     lv_label_set_text(lblFolder, "");
 
-    // ---- Volume slider (below disc/VU area) ----
-    lv_obj_t *vTag = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(vTag, COL_PURPLE, 0);
-    lv_obj_set_style_text_font(vTag, &UbuntuCond14, 0);
-    lv_obj_set_pos(vTag, 8, 118);
-    lv_label_set_text(vTag, "VOL");
+    // ---- Volume slider (vertical, right side, hidden by default) ----
+    volTag = lv_label_create(screenPlayer);
+    lv_obj_set_style_text_color(volTag, COL_TXT, 0);
+    lv_obj_set_style_text_font(volTag, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(volTag, 308, 30);
+    lv_label_set_text(volTag, LV_SYMBOL_VOLUME_MAX);
 
     volSlider = lv_slider_create(screenPlayer);
-    lv_obj_set_size(volSlider, 230, 8);
-    lv_obj_set_pos(volSlider, 36, 120);
+    lv_obj_set_size(volSlider, 8, 120);
+    lv_obj_set_pos(volSlider, 306, 48);
     lv_slider_set_range(volSlider, 0, 100);
     lv_obj_set_style_bg_color(volSlider, COL_PANEL, LV_PART_MAIN);
-    lv_obj_set_style_border_color(volSlider, COL_PURPLE, LV_PART_MAIN);
+    lv_obj_set_style_border_color(volSlider, COL_GRAY, LV_PART_MAIN);
     lv_obj_set_style_border_width(volSlider, 1, LV_PART_MAIN);
     lv_obj_set_style_bg_color(volSlider, COL_PINK, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(volSlider, COL_CYAN, LV_PART_KNOB);
+    lv_obj_set_style_bg_color(volSlider, COL_GREEN, LV_PART_KNOB);
     lv_obj_set_style_pad_all(volSlider, 4, LV_PART_KNOB);
     lv_obj_add_event_cb(volSlider, on_vol_change, LV_EVENT_VALUE_CHANGED, NULL);
+    // Hide volume by default
+    lv_obj_add_flag(volTag, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(volSlider, LV_OBJ_FLAG_HIDDEN);
 
     lblVol = lv_label_create(screenPlayer);
-    lv_obj_set_style_text_color(lblVol, COL_PINK, 0);
-    lv_obj_set_style_text_font(lblVol, &UbuntuCond14, 0);
-    lv_obj_set_pos(lblVol, 272, 116);
-    lv_label_set_text(lblVol, "---%");
+    lv_obj_set_style_text_color(lblVol, COL_TXT, 0);
+    lv_obj_set_style_text_font(lblVol, &lv_font_montserrat_14, 0);
+    lv_obj_set_pos(lblVol, 297, 170);
+    lv_label_set_text(lblVol, "---");
+    lv_obj_add_flag(lblVol, LV_OBJ_FLAG_HIDDEN);
 
     int pct = audioGetVolumePerCent();
+    // Override to 50% on boot
+    audioSetVolume(11);
+    pct = 50;
     lv_slider_set_value(volSlider, pct, LV_ANIM_OFF);
     refresh_volume_label(pct);
 
-    // ---- Transport bar (y=136..236) ----
+    // ---- Time labels above progress bar ----
+    lblTimeElapsed = lv_label_create(screenPlayer);
+    lv_obj_set_style_text_color(lblTimeElapsed, COL_TXT_DIM, 0);
+    lv_obj_set_style_text_font(lblTimeElapsed, &UbuntuCond14, 0);
+    lv_obj_set_pos(lblTimeElapsed, 4, 168);
+    lv_label_set_text(lblTimeElapsed, "0:00");
+
+    lblTimeDuration = lv_label_create(screenPlayer);
+    lv_obj_set_style_text_color(lblTimeDuration, COL_TXT_DIM, 0);
+    lv_obj_set_style_text_font(lblTimeDuration, &UbuntuCond14, 0);
+    lv_obj_set_pos(lblTimeDuration, 276, 168);
+    lv_label_set_text(lblTimeDuration, "0:00");
+
+    // ---- Transport bar with integrated progress ----
     lv_obj_t *tbar = lv_obj_create(screenPlayer);
     lv_obj_remove_style_all(tbar);
-    lv_obj_set_size(tbar, 320, 104);
-    lv_obj_set_pos(tbar, 0, 136);
-    lv_obj_set_style_bg_color(tbar, lv_color_hex(0x0a0700), 0);
+    lv_obj_set_size(tbar, 320, 62);
+    lv_obj_set_pos(tbar, 0, 184);
+    lv_obj_set_style_bg_color(tbar, COL_BG, 0);
     lv_obj_set_style_bg_opa(tbar, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(tbar, COL_AMBER_DIM, 0);
-    lv_obj_set_style_border_side(tbar, LV_BORDER_SIDE_TOP, 0);
-    lv_obj_set_style_border_width(tbar, 1, 0);
+    lv_obj_set_style_border_width(tbar, 0, 0);
     lv_obj_clear_flag(tbar, LV_OBJ_FLAG_SCROLLABLE);
 
-    // idx 0=PREV, 1=PLAY/PAUSE, 2=NEXT, 3=FOLDER
-    make_transport_btn(tbar, LV_SYMBOL_PREV,     4,   0, COL_CYAN);
-    btnPlayPause = make_transport_btn(tbar, LV_SYMBOL_PLAY,  66,  1, COL_LIME);
-    // Cache the label so we can toggle between PLAY / PAUSE
-    lblPlayPause = lv_obj_get_child(btnPlayPause, 0);
+    // Progress bar as top line of transport area
+    barProgress = lv_bar_create(tbar);
+    lv_obj_remove_style_all(barProgress);
+    lv_obj_add_style(barProgress, &st_vu_bg, LV_PART_MAIN);
+    lv_obj_set_size(barProgress, 320, 3);
+    lv_obj_set_pos(barProgress, 0, 0);
+    lv_bar_set_range(barProgress, 0, 100);
+    lv_bar_set_value(barProgress, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(barProgress, COL_PINK, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(barProgress, 0, LV_PART_INDICATOR);
 
-    make_transport_btn(tbar, LV_SYMBOL_NEXT,      128, 2, COL_YELLOW);
-    make_transport_btn(tbar, LV_SYMBOL_LIST,      190, 3, COL_MAGENTA);
+    // transport idx: 1=PREV, 2=PLAY/PAUSE, 3=NEXT, 4=FOLDER, 5=VOL (MODE has own handler)
+    // Play mode button leftmost (cycles: loop all -> shuffle -> repeat one)
+    btnPlayMode = lv_btn_create(tbar);
+    lv_obj_remove_style_all(btnPlayMode);
+    lv_obj_add_style(btnPlayMode, &st_btn, 0);
+    lv_obj_add_style(btnPlayMode, &st_btn_pressed, LV_STATE_PRESSED);
+    lv_obj_set_size(btnPlayMode, 34, 34);
+    lv_obj_align(btnPlayMode, LV_ALIGN_LEFT_MID, 20, 0);
+    lv_obj_set_style_radius(btnPlayMode, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(btnPlayMode, COL_GRAY, 0);
+    lv_obj_set_style_text_color(btnPlayMode, COL_GRAY, 0);
+    lv_obj_set_style_bg_color(btnPlayMode, COL_GRAY, LV_STATE_PRESSED);
+    lblPlayMode = lv_label_create(btnPlayMode);
+    lv_label_set_text(lblPlayMode, LV_SYMBOL_LOOP);
+    lv_obj_set_style_text_font(lblPlayMode, &lv_font_montserrat_14, 0);
+    lv_obj_center(lblPlayMode);
+    lv_obj_add_event_cb(btnPlayMode, on_play_mode, LV_EVENT_CLICKED, NULL);
 
-    // "Sources" button on the far right
-    make_transport_btn(tbar, LV_SYMBOL_AUDIO,     252, 4, COL_CYAN);
+    make_transport_btn(tbar, LV_SYMBOL_PREV,    62,  1, COL_GRAY);
+    make_transport_btn(tbar, LV_SYMBOL_NEXT,     153,  3, COL_GRAY);
+    // Play/pause round button, overlapping both PREV and NEXT (created after so it draws on top)
+    btnPlayPause = lv_btn_create(tbar);
+    lv_obj_remove_style_all(btnPlayPause);
+    lv_obj_add_style(btnPlayPause, &st_btn, 0);
+    lv_obj_add_style(btnPlayPause, &st_btn_pressed, LV_STATE_PRESSED);
+    lv_obj_set_size(btnPlayPause, 60, 60);
+    lv_obj_align(btnPlayPause, LV_ALIGN_LEFT_MID, 105, 0);
+    lv_obj_set_style_radius(btnPlayPause, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(btnPlayPause, COL_PINK, 0);
+    lv_obj_set_style_text_color(btnPlayPause, COL_PINK, 0);
+    lv_obj_set_style_bg_color(btnPlayPause, COL_PINK, LV_STATE_PRESSED);
+    lblPlayPause = lv_label_create(btnPlayPause);
+    lv_label_set_text(lblPlayPause, LV_SYMBOL_PLAY);
+    lv_obj_set_style_text_font(lblPlayPause, &lv_font_montserrat_14, 0);
+    lv_obj_center(lblPlayPause);
+    lv_obj_add_event_cb(btnPlayPause, on_transport, LV_EVENT_CLICKED, (void*)(intptr_t)2);
+
+    // FOLDER button as circle
+    lv_obj_t *btnFolder = lv_btn_create(tbar);
+    lv_obj_remove_style_all(btnFolder);
+    lv_obj_add_style(btnFolder, &st_btn, 0);
+    lv_obj_add_style(btnFolder, &st_btn_pressed, LV_STATE_PRESSED);
+    lv_obj_set_size(btnFolder, 34, 34);
+    lv_obj_align(btnFolder, LV_ALIGN_LEFT_MID, 217, 0);
+    lv_obj_set_style_radius(btnFolder, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(btnFolder, COL_PINK, 0);
+    lv_obj_set_style_text_color(btnFolder, COL_PINK, 0);
+    lv_obj_set_style_bg_color(btnFolder, COL_PINK, LV_STATE_PRESSED);
+    lv_obj_t *lblFolderBtn = lv_label_create(btnFolder);
+    lv_label_set_text(lblFolderBtn, LV_SYMBOL_DIRECTORY);
+    lv_obj_set_style_text_font(lblFolderBtn, &lv_font_montserrat_14, 0);
+    lv_obj_center(lblFolderBtn);
+    lv_obj_add_event_cb(btnFolder, on_transport, LV_EVENT_CLICKED, (void*)(intptr_t)4);
+
+    // Volume toggle button (circle)
+    lv_obj_t *btnVol = lv_btn_create(tbar);
+    lv_obj_remove_style_all(btnVol);
+    lv_obj_add_style(btnVol, &st_btn, 0);
+    lv_obj_add_style(btnVol, &st_btn_pressed, LV_STATE_PRESSED);
+    lv_obj_set_size(btnVol, 34, 34);
+    lv_obj_align(btnVol, LV_ALIGN_LEFT_MID, 260, 0);
+    lv_obj_set_style_radius(btnVol, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(btnVol, COL_PINK, 0);
+    lv_obj_set_style_text_color(btnVol, COL_PINK, 0);
+    lv_obj_set_style_bg_color(btnVol, COL_PINK, LV_STATE_PRESSED);
+    lv_obj_t *lblVolBtn = lv_label_create(btnVol);
+    lv_label_set_text(lblVolBtn, LV_SYMBOL_VOLUME_MAX);
+    lv_obj_set_style_text_font(lblVolBtn, &lv_font_montserrat_14, 0);
+    lv_obj_center(lblVolBtn);
+    lv_obj_add_event_cb(btnVol, on_transport, LV_EVENT_CLICKED, (void*)(intptr_t)5);
 
     lv_obj_clear_flag(screenPlayer, LV_OBJ_FLAG_SCROLLABLE);
 }
@@ -566,10 +671,10 @@ static void build_sources(void)
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 30);
     lv_label_set_text(title, "PICK A SOURCE");
 
-    make_big_btn(screenSources, LV_SYMBOL_SD_CARD,  "SD FILES",  8,   56, 148, 70, 0, on_source_pick, COL_LIME);
-    make_big_btn(screenSources, LV_SYMBOL_AUDIO,    "RADIO",     164, 56, 148, 70, 1, on_source_pick, COL_CYAN);
+    make_big_btn(screenSources, LV_SYMBOL_SD_CARD,  "SD FILES",  8,   56, 148, 70, 0, on_source_pick, COL_GREEN);
+    make_big_btn(screenSources, LV_SYMBOL_AUDIO,    "RADIO",     164, 56, 148, 70, 1, on_source_pick, COL_GREEN);
     make_big_btn(screenSources, LV_SYMBOL_KEYBOARD, "SPEECH",    8,   132,148, 70, 2, on_source_pick, COL_PINK);
-    make_big_btn(screenSources, LV_SYMBOL_SETTINGS, "SETTINGS",  164, 132,148, 70, 3, on_source_pick, COL_YELLOW);
+    make_big_btn(screenSources, LV_SYMBOL_SETTINGS, "SETTINGS",  164, 132,148, 70, 3, on_source_pick, COL_GREEN);
 
     lv_obj_t *back = lv_btn_create(screenSources);
     lv_obj_remove_style_all(back);
@@ -621,14 +726,13 @@ static void browser_populate(lv_obj_t *list)
     lv_obj_clean(list);
     browser_n_entries = 0;
     static const lv_color_t accents[] = {
-        lv_color_hex(0x70ff20), lv_color_hex(0x00e8ff),
-        lv_color_hex(0xffd000), lv_color_hex(0xff5a8e),
-        lv_color_hex(0x9040ff), lv_color_hex(0xff30d0),
+        COL_GREEN, COL_PINK, COL_TXT, COL_GRAY,
+        COL_GREEN, COL_PINK,
     };
 
     if (SD.cardType() == CARD_NONE) {
         lv_obj_t *e = lv_list_add_text(list, "SD card not mounted");
-        lv_obj_set_style_text_color(e, COL_RED, 0);
+        lv_obj_set_style_text_color(e, COL_PINK, 0);
         return;
     }
 
@@ -647,7 +751,7 @@ static void browser_populate(lv_obj_t *list)
             return;
         }
         lv_obj_t *e = lv_list_add_text(list, "directory missing");
-        lv_obj_set_style_text_color(e, COL_RED, 0);
+        lv_obj_set_style_text_color(e, COL_PINK, 0);
         return;
     }
 
@@ -656,9 +760,9 @@ static void browser_populate(lv_obj_t *list)
         browser_is_dir[browser_n_entries] = true;
         lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_UP, "..");
         lv_obj_set_style_bg_color(btn, COL_PANEL, 0);
-        lv_obj_set_style_text_color(btn, COL_CYAN, 0);
+        lv_obj_set_style_text_color(btn, COL_GREEN, 0);
         lv_obj_set_style_text_font(btn, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_border_color(btn, COL_CYAN, 0);
+        lv_obj_set_style_border_color(btn, COL_GREEN, 0);
         lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_add_event_cb(btn, on_browser_pick, LV_EVENT_CLICKED,
@@ -711,7 +815,7 @@ static void build_browser(void)
     add_status_bar(screenBrowser, &sbB_l, &sbB_r, &sbB_m);
 
     lv_obj_t *title = lv_label_create(screenBrowser);
-    lv_obj_set_style_text_color(title, COL_LIME, 0);
+    lv_obj_set_style_text_color(title, COL_GREEN, 0);
     lv_obj_set_style_text_font(title, &UbuntuCond14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 30);
     lv_label_set_text(title, "SD FILES");
@@ -720,7 +824,7 @@ static void build_browser(void)
     lv_obj_set_size(browserList, 304, 148);
     lv_obj_align(browserList, LV_ALIGN_TOP_LEFT, 8, 48);
     lv_obj_set_style_bg_color(browserList, COL_BG, 0);
-    lv_obj_set_style_border_color(browserList, COL_AMBER_DIM, 0);
+    lv_obj_set_style_border_color(browserList, COL_GRAY, 0);
     lv_obj_set_style_border_width(browserList, 1, 0);
     lv_obj_set_style_pad_all(browserList, 2, 0);
     lv_obj_set_style_radius(browserList, 0, 0);
@@ -732,9 +836,9 @@ static void build_browser(void)
     lv_obj_set_size(back, 88, 28);
     lv_obj_align(back, LV_ALIGN_BOTTOM_LEFT, 8, -6);
     lv_obj_t *bl = lv_label_create(back);
-    lv_label_set_text(bl, LV_SYMBOL_LEFT " BACK");
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " PLAYER");
     lv_obj_center(bl);
-    lv_obj_add_event_cb(back, on_back_to_sources, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(back, on_back_to_player, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *refresh = lv_btn_create(screenBrowser);
     lv_obj_remove_style_all(refresh);
@@ -772,7 +876,7 @@ static void build_radio(void)
     add_status_bar(screenRadio, &sbR_l, &sbR_r, &sbR_m);
 
     lv_obj_t *title = lv_label_create(screenRadio);
-    lv_obj_set_style_text_color(title, COL_CYAN, 0);
+    lv_obj_set_style_text_color(title, COL_GREEN, 0);
     lv_obj_set_style_text_font(title, &UbuntuCond14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 30);
     lv_label_set_text(title, "RADIO PRESETS");
@@ -781,12 +885,12 @@ static void build_radio(void)
     lv_obj_set_size(list, 304, 148);
     lv_obj_align(list, LV_ALIGN_TOP_LEFT, 8, 48);
     lv_obj_set_style_bg_color(list, COL_BG, 0);
-    lv_obj_set_style_border_color(list, COL_AMBER_DIM, 0);
+    lv_obj_set_style_border_color(list, COL_GRAY, 0);
     lv_obj_set_style_border_width(list, 1, 0);
     lv_obj_set_style_pad_all(list, 2, 0);
     lv_obj_set_style_radius(list, 0, 0);
 
-    const lv_color_t r_accents[] = { COL_CYAN, COL_LIME, COL_YELLOW, COL_PINK, COL_MAGENTA };
+    const lv_color_t r_accents[] = { COL_GREEN, COL_PINK, COL_TXT, COL_GREEN, COL_PINK };
     for (int i = 0; i < radio_count; i++) {
         lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_AUDIO, radio_presets[i].label);
         lv_color_t a = r_accents[i % 5];
@@ -845,12 +949,12 @@ static void build_tts(void)
     lv_obj_set_size(list, 304, 148);
     lv_obj_align(list, LV_ALIGN_TOP_LEFT, 8, 48);
     lv_obj_set_style_bg_color(list, COL_BG, 0);
-    lv_obj_set_style_border_color(list, COL_AMBER_DIM, 0);
+    lv_obj_set_style_border_color(list, COL_GRAY, 0);
     lv_obj_set_style_border_width(list, 1, 0);
     lv_obj_set_style_pad_all(list, 2, 0);
     lv_obj_set_style_radius(list, 0, 0);
 
-    const lv_color_t t_accents[] = { COL_PINK, COL_PURPLE, COL_CYAN, COL_LIME, COL_YELLOW };
+    const lv_color_t t_accents[] = { COL_PINK, COL_GREEN, COL_TXT, COL_PINK, COL_GREEN };
     for (int i = 0; i < tts_count; i++) {
         lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_KEYBOARD, tts_phrases[i].label);
         lv_color_t a = t_accents[i % 5];
@@ -926,7 +1030,7 @@ static void build_settings(void)
     add_status_bar(screenSettings, &sbX_l, &sbX_r, &sbX_m);
 
     lv_obj_t *title = lv_label_create(screenSettings);
-    lv_obj_set_style_text_color(title, COL_YELLOW, 0);
+    lv_obj_set_style_text_color(title, COL_GREEN, 0);
     lv_obj_set_style_text_font(title, &UbuntuCond14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 8, 30);
     lv_label_set_text(title, "DIAGNOSTICS");
@@ -947,7 +1051,7 @@ static void build_settings(void)
     lv_label_set_text(lblSysinfo, s_statusBuf);
 
     lblLdrLive = lv_label_create(screenSettings);
-    lv_obj_set_style_text_color(lblLdrLive, COL_AMBER, 0);
+    lv_obj_set_style_text_color(lblLdrLive, COL_GREEN, 0);
     lv_obj_set_style_text_font(lblLdrLive, &UbuntuCond14, 0);
     lv_obj_align(lblLdrLive, LV_ALIGN_TOP_LEFT, 8, 170);
     lv_label_set_text(lblLdrLive, "LDR: ----   day/night: --");
@@ -1032,11 +1136,15 @@ static void set_track(const char *name, bool playing)
             // Show just the last folder component
             const char *last = strrchr(folder, '/');
             if (last && last[1]) last++; else last = folder;
-            lv_label_set_text_fmt(lblFolder, LV_SYMBOL_DIRECTORY " %s", last);
+            lv_label_set_text_fmt(lblFolder, "%s", last);
         } else {
             lv_label_set_text(lblFolder, "");
         }
     }
+    // Reset progress bar and time
+    if (barProgress) lv_bar_set_value(barProgress, 0, LV_ANIM_OFF);
+    if (lblTimeElapsed) lv_label_set_text(lblTimeElapsed, "0:00");
+    if (lblTimeDuration) lv_label_set_text(lblTimeDuration, "0:00");
     update_play_pause_btn();
 }
 
@@ -1059,17 +1167,78 @@ static void refresh_volume_label(int pct)
 // ===========================================================================
 static void cb_vu(lv_timer_t *t)
 {
+    // FPS counting
+    s_frame_cnt++;
+    uint32_t now = lv_tick_get();
+    if (now - s_fps_tick >= 1000) {
+        s_fps_val = s_frame_cnt * 1000 / (now - s_fps_tick);
+        s_frame_cnt = 0;
+        s_fps_tick = now;
+    }
+
     if (lv_scr_act() != screenPlayer) return;
     uint32_t vu = audioGetRMS();
-    uint8_t r = (vu >> 16) & 0xFF;
-    uint8_t l = vu & 0xFF;
-    lv_bar_set_value(vuL, l, LV_ANIM_OFF);
-    lv_bar_set_value(vuR, r, LV_ANIM_OFF);
+    // RMS values are post-volume (16-bit per channel).
+    // Compensate for volume so VU shows signal level regardless of volume setting.
+    // Volume slider 0-100 maps to audio steps 0-21; gain = (step*3120)^2 >> 16.
+    // We normalize by multiplying RMS by (65535/max(gain,1)) so the VU
+    // always reflects the original signal, not the attenuated one.
+    uint8_t volPct = audioGetVolumePerCent();
+    // Approximate gain factor: at volPct%, step = volPct*21/100
+    // gain = (step * 3120)^2 >> 16.  At 100%: gain ≈ 65535.  At 50%: gain ≈ 16384.
+    // We boost raw RMS by 65535/max(gain, 100) to normalize.
+    uint32_t step = (uint32_t)(volPct * 21) / 100;
+    if (step < 1) step = 1;
+    uint32_t g = (uint32_t)step * 3120;
+    uint32_t gain = ((g * g) + 65535) >> 16;
+    if (gain < 100) gain = 100;
+    uint32_t boost = 65535 / gain;  // e.g. 65535/65535=1 at 100%, ~4 at 25%
+
+    uint16_t r16 = ((vu >> 16) & 0xFFFF);
+    uint16_t l16 = (vu & 0xFFFF);
+    // Apply volume-compensated boost, then log-scale
+    auto vu_map = [boost](uint16_t raw) -> int {
+        uint32_t compensated = (uint32_t)raw * boost;
+        if (compensated > 65535) compensated = 65535;
+        if (compensated == 0) return 0;
+        // Log curve: maps 1..65535 → ~6..100
+        int v = (int)(100.0f * log2f((float)compensated + 3.0f) / log2f(2048.0f));
+        return v > 100 ? 100 : v;
+    };
+    lv_bar_set_value(vuL, vu_map(l16), LV_ANIM_OFF);
+    lv_bar_set_value(vuR, vu_map(r16), LV_ANIM_OFF);
+
+    // Update progress bar and time labels while playing
+    if (s_playing) {
+        uint32_t cur = audioGetCurrentTime();
+        uint32_t dur = audioGetFileDuration();
+        if (dur > 0) {
+            lv_bar_set_value(barProgress, (int)((cur * 100) / dur), LV_ANIM_OFF);
+        } else {
+            lv_bar_set_value(barProgress, 0, LV_ANIM_OFF);
+        }
+        char tb[8];
+        fmt_time(cur, tb, sizeof(tb));
+        lv_label_set_text(lblTimeElapsed, tb);
+        fmt_time(dur, tb, sizeof(tb));
+        lv_label_set_text(lblTimeDuration, tb);
+    }
+}
+
+static void fmt_time(uint32_t secs, char *buf, size_t n)
+{
+    snprintf(buf, n, "%u:%02u", (unsigned)(secs / 60), (unsigned)(secs % 60));
 }
 
 static void cb_status(lv_timer_t *t)
 {
     refresh_status_bar();
+
+    // Handle track-end advance (deferred from audio core)
+    if (s_track_ended) {
+        s_track_ended = false;
+        advance_track();
+    }
 
     bool now = audioIsPlaying();
     if (now != s_playing) {
@@ -1078,7 +1247,7 @@ static void cb_status(lv_timer_t *t)
         if (lblNowPlaying) {
             lv_label_set_text(lblNowPlaying,
                 now ? LV_SYMBOL_PAUSE " NOW PLAYING" : LV_SYMBOL_PLAY " STOPPED");
-            lv_obj_set_style_text_color(lblNowPlaying, now ? COL_LIME : COL_TXT_DIM, 0);
+            lv_obj_set_style_text_color(lblNowPlaying, now ? COL_GREEN : COL_TXT_DIM, 0);
         }
     }
 }
@@ -1114,12 +1283,20 @@ static void on_transport(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     switch (idx) {
-        case 0: // PREV
-            if (s_pl_count > 0 && s_pl_idx > 0) {
-                playlist_play_idx(s_pl_idx - 1);
+        case 1: // PREV
+            if (s_pl_count > 0 && s_pl_idx >= 0) {
+                if (s_play_mode == PM_SHUFFLE) {
+                    int prev;
+                    do { prev = esp_random() % s_pl_count; } while (prev == s_pl_idx && s_pl_count > 1);
+                    playlist_play_idx(prev);
+                } else {
+                    int prev = s_pl_idx - 1;
+                    if (prev < 0) prev = s_pl_count - 1;
+                    playlist_play_idx(prev);
+                }
             }
             break;
-        case 1: // PLAY / PAUSE toggle
+        case 2: // PLAY / PAUSE toggle
             if (s_playing) {
                 // Currently playing -> stop
                 audioStopSong();
@@ -1141,22 +1318,40 @@ static void on_transport(lv_event_t *e)
                 }
             }
             break;
-        case 2: // NEXT
-            if (s_pl_count > 0 && s_pl_idx < s_pl_count - 1) {
-                playlist_play_idx(s_pl_idx + 1);
+        case 3: // NEXT
+            if (s_pl_count > 0 && s_pl_idx >= 0) {
+                if (s_play_mode == PM_SHUFFLE) {
+                    int next;
+                    do { next = esp_random() % s_pl_count; } while (next == s_pl_idx && s_pl_count > 1);
+                    playlist_play_idx(next);
+                } else {
+                    int next = s_pl_idx + 1;
+                    if (next >= s_pl_count) next = 0;
+                    playlist_play_idx(next);
+                }
             }
             break;
-        case 3: // FOLDER - jump to browser in current playlist dir
+        case 4: // FOLDER - jump to browser
             if (s_pl_dir[0]) {
                 snprintf(browser_cwd, sizeof(browser_cwd), "%s", s_pl_dir);
+            } else {
+                snprintf(browser_cwd, sizeof(browser_cwd), "/music");
             }
             browser_populate(browserList);
             lv_scr_load_anim(screenBrowser, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
             refresh_status_bar();
             break;
-        case 4: // SOURCES
-            lv_scr_load_anim(screenSources, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
-            refresh_status_bar();
+        case 5: // VOL TOGGLE
+            s_vol_visible = !s_vol_visible;
+            if (s_vol_visible) {
+                if (volTag)    lv_obj_clear_flag(volTag, LV_OBJ_FLAG_HIDDEN);
+                if (volSlider) lv_obj_clear_flag(volSlider, LV_OBJ_FLAG_HIDDEN);
+                if (lblVol)    lv_obj_clear_flag(lblVol, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                if (volTag)    lv_obj_add_flag(volTag, LV_OBJ_FLAG_HIDDEN);
+                if (volSlider) lv_obj_add_flag(volSlider, LV_OBJ_FLAG_HIDDEN);
+                if (lblVol)    lv_obj_add_flag(lblVol, LV_OBJ_FLAG_HIDDEN);
+            }
             break;
     }
 }
@@ -1272,6 +1467,63 @@ static void on_settings_action(lv_event_t *e)
     }
 }
 
+static void on_play_mode(lv_event_t *e)
+{
+    s_play_mode = (play_mode_t)((s_play_mode + 1) % 3);
+    if (!lblPlayMode) return;
+    switch (s_play_mode) {
+        case PM_LOOP_ALL:
+            lv_label_set_text(lblPlayMode, LV_SYMBOL_LOOP);
+            lv_obj_set_style_border_color(btnPlayMode, COL_GRAY, 0);
+            lv_obj_set_style_text_color(btnPlayMode, COL_GRAY, 0);
+            lv_obj_set_style_bg_color(btnPlayMode, COL_GRAY, LV_STATE_PRESSED);
+            break;
+        case PM_SHUFFLE:
+            lv_label_set_text(lblPlayMode, LV_SYMBOL_SHUFFLE);
+            lv_obj_set_style_border_color(btnPlayMode, COL_TXT, 0);
+            lv_obj_set_style_text_color(btnPlayMode, COL_TXT, 0);
+            lv_obj_set_style_bg_color(btnPlayMode, COL_TXT, LV_STATE_PRESSED);
+            break;
+        case PM_REPEAT_ONE:
+            lv_label_set_text(lblPlayMode, LV_SYMBOL_REFRESH);
+            lv_obj_set_style_border_color(btnPlayMode, COL_PINK, 0);
+            lv_obj_set_style_text_color(btnPlayMode, COL_PINK, 0);
+            lv_obj_set_style_bg_color(btnPlayMode, COL_PINK, LV_STATE_PRESSED);
+            break;
+    }
+}
+
+static void on_source_tap(lv_event_t *e)
+{
+    lv_scr_load_anim(screenSources, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+    refresh_status_bar();
+}
+
+static void advance_track(void)
+{
+    if (s_pl_count == 0 || s_pl_idx < 0) return;
+    switch (s_play_mode) {
+        case PM_LOOP_ALL:
+            if (s_pl_idx < s_pl_count - 1)
+                playlist_play_idx(s_pl_idx + 1);
+            else
+                playlist_play_idx(0);
+            break;
+        case PM_SHUFFLE:
+            if (s_pl_count == 1) {
+                playlist_play_idx(0);
+            } else {
+                int next;
+                do { next = esp_random() % s_pl_count; } while (next == s_pl_idx);
+                playlist_play_idx(next);
+            }
+            break;
+        case PM_REPEAT_ONE:
+            playlist_play_idx(s_pl_idx);
+            break;
+    }
+}
+
 // ===========================================================================
 //        Backwards-compat: kept because CYD28_audio.h declares it.
 // ===========================================================================
@@ -1288,4 +1540,5 @@ void audio_eof_mp3(const char *info)
 {
     Serial.print("eof_mp3     ");
     Serial.println(info);
+    s_track_ended = true;
 }
